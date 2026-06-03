@@ -5,24 +5,18 @@ Unified Session Extractor — 支持 Codex 和 Claude Code 两种会话格式。
 自动检测平台，单次遍历提取上下文。
 
 用法：
-    # 按 session ID 自动定位（自动检测平台）
     python session_extract.py --session <session-id>
-
-    # 直接指定文件（自动检测平台）
     python session_extract.py <session.jsonl>
-
-    # 只输出工作摘要
     python session_extract.py --summary <session.jsonl>
-
-    # 强制指定平台
-    python session_extract.py --platform codex <file>
-    python session_extract.py --platform claude <file>
+    python session_extract.py --platform codex|claude <file>
 """
 import json
 import os
 import sys
 import glob
-from collections import Counter
+
+from extract_codex import extract as extract_codex
+from extract_claude import extract as extract_claude
 
 
 # ============================================================
@@ -30,28 +24,21 @@ from collections import Counter
 # ============================================================
 
 def find_session(session_id, home=None):
-    """
-    在 Codex 和 Claude Code 两个目录中搜索 session ID。
-    返回 (platform, filepath) 或 (None, None)。
-    """
+    """在 Codex 和 Claude Code 两个目录中搜索 session ID。"""
     if home is None:
         home = os.path.expanduser("~")
 
-    # Search Codex sessions
-    codex_patterns = [
+    for pattern in [
         os.path.join(home, ".codex", "sessions", "**", "*.jsonl"),
         os.path.join(home, ".codex", "archived_sessions", "*.jsonl"),
-    ]
-    for pattern in codex_patterns:
+    ]:
         for f in glob.glob(pattern, recursive=True):
             if session_id in os.path.basename(f):
                 return ("codex", f)
 
-    # Search Claude Code sessions
-    claude_patterns = [
+    for pattern in [
         os.path.join(home, ".claude", "projects", "**", "*.jsonl"),
-    ]
-    for pattern in claude_patterns:
+    ]:
         for f in glob.glob(pattern, recursive=True):
             if session_id in os.path.basename(f):
                 return ("claude", f)
@@ -60,11 +47,7 @@ def find_session(session_id, home=None):
 
 
 def detect_platform(filepath):
-    """
-    通过文件内容检测平台。
-    Codex: 第一行是 session_meta 类型
-    Claude Code: 第一行是 user 类型（含 sessionId 字段）
-    """
+    """通过文件首行检测平台。"""
     with open(filepath, "r", encoding="utf-8") as f:
         first = json.loads(f.readline())
     if first.get("type") == "session_meta":
@@ -74,236 +57,18 @@ def detect_platform(filepath):
     return "unknown"
 
 
-# ============================================================
-# Unified Extraction
-# ============================================================
-
 def extract(filepath, platform=None):
-    """
-    单次遍历 JSONL 文件，根据平台选择提取策略。
-    返回统一结构的 dict。
-    """
+    """根据平台分派到对应提取器。"""
     if platform is None:
         platform = detect_platform(filepath)
 
-    result = {
-        "platform": platform,
-        "session_info": {},
-        "user_msgs": [],
-        "agent_texts": [],
-        "tool_uses": [],
-        "tool_use_counts": Counter(),
-        "file_changes": [],
-        "file_change_set": set(),
-        "system_events": [],
-        "queue_ops": [],
-        "session_title": "",
-        "total_user_msgs": 0,
-        "total_agent_msgs": 0,
-        "total_tool_results": 0,
-        "api_errors": 0,
-        "turn_aborted": 0,
-        "compacted_summaries": [],
-    }
-
-    with open(filepath, "r", encoding="utf-8") as f:
-        first_line = True
-        for line in f:
-            obj = json.loads(line)
-            t = obj.get("type", "")
-
-            if platform == "codex":
-                _extract_codex(obj, t, result, first_line)
-            else:
-                _extract_claude(obj, t, result, first_line)
-
-            if first_line:
-                first_line = False
-
-    return result
-
-
-def _extract_codex(obj, t, result, first_line):
-    """Codex JSONL 提取逻辑。"""
-
-    # --- session_meta (第 1 行) ---
-    if first_line and t == "session_meta":
-        p = obj.get("payload", {})
-        git = p.get("git", {})
-        result["session_info"] = {
-            "sessionId": "",
-            "cwd": p.get("cwd", ""),
-            "branch": git.get("branch", ""),
-            "commit": git.get("commit_hash", ""),
-            "repo_url": git.get("repository_url", ""),
-            "model": p.get("model_provider", ""),
-            "timestamp": p.get("timestamp", ""),
-        }
-
-    # --- event_msg ---
-    if t == "event_msg":
-        p = obj.get("payload", {})
-        et = p.get("type", "")
-        msg = p.get("message", "")
-
-        if et == "user_message" and msg.strip():
-            result["total_user_msgs"] += 1
-            result["user_msgs"].append({
-                "text": msg.strip()[:2000],
-                "timestamp": obj.get("timestamp", ""),
-            })
-
-        elif et == "agent_message" and msg.strip():
-            result["total_agent_msgs"] += 1
-            result["agent_texts"].append({
-                "text": msg.strip()[:2000],
-                "timestamp": obj.get("timestamp", ""),
-            })
-
-        elif et == "task_complete":
-            last_msg = p.get("last_agent_message", "")
-            if last_msg and last_msg.strip():
-                result["agent_texts"].append({
-                    "text": last_msg.strip()[:2000],
-                    "timestamp": obj.get("timestamp", ""),
-                    "is_task_complete": True,
-                })
-
-        elif et == "turn_aborted":
-            result["turn_aborted"] += 1
-
-        elif et == "context_compacted":
-            rh = p.get("replacement_history", "")
-            if rh:
-                result["compacted_summaries"].append(
-                    rh[:500] if isinstance(rh, str) else json.dumps(rh, ensure_ascii=False)[:500]
-                )
-
-    # --- turn_context ---
-    elif t == "turn_context":
-        p = obj.get("payload", {})
-        summary = p.get("summary", "")
-        model = p.get("model", "")
-        if summary and summary.strip():
-            result["session_info"]["last_model"] = model
-
-    # --- response_item (工具调用) ---
-    elif t == "response_item":
-        p = obj.get("payload", {})
-        content = p.get("content", [])
-        if isinstance(content, list):
-            for c in content:
-                if c.get("type") == "tool_use":
-                    tool_name = c.get("name", "unknown")
-                    result["tool_use_counts"][tool_name] += 1
-
-    # --- compacted ---
-    elif t == "compacted":
-        p = obj.get("payload", {})
-
-
-def _extract_claude(obj, t, result, first_line):
-    """Claude Code JSONL 提取逻辑。"""
-
-    # --- 首条 user 消息提取 session info ---
-    if first_line and t == "user":
-        result["session_info"] = {
-            "sessionId": obj.get("sessionId", ""),
-            "cwd": obj.get("cwd", ""),
-            "branch": obj.get("gitBranch", ""),
-            "version": obj.get("version", ""),
-            "entrypoint": obj.get("entrypoint", ""),
-        }
-
-    # --- user 消息 ---
-    if t == "user":
-        result["total_user_msgs"] += 1
-        msg = obj.get("message", {})
-        content = msg.get("content", "")
-        is_meta = obj.get("isMeta", False)
-
-        if isinstance(content, list):
-            for c in content:
-                if c.get("type") == "tool_result":
-                    result["total_tool_results"] += 1
-                elif c.get("type") == "text":
-                    text = c.get("text", "").strip()
-                    if text:
-                        result["user_msgs"].append({
-                            "text": text[:2000],
-                            "isMeta": is_meta,
-                            "timestamp": obj.get("timestamp", ""),
-                        })
-        elif isinstance(content, str):
-            text = content.strip()
-            if text:
-                result["user_msgs"].append({
-                    "text": text[:2000],
-                    "isMeta": is_meta,
-                    "timestamp": obj.get("timestamp", ""),
-                })
-
-    # --- assistant 消息 ---
-    elif t == "assistant":
-        result["total_agent_msgs"] += 1
-        msg = obj.get("message", {})
-        content = msg.get("content", [])
-
-        if isinstance(content, list):
-            for c in content:
-                if c.get("type") == "text":
-                    text = c.get("text", "").strip()
-                    if text:
-                        result["agent_texts"].append({
-                            "text": text[:2000],
-                            "timestamp": obj.get("timestamp", ""),
-                        })
-                elif c.get("type") == "tool_use":
-                    tool_name = c.get("name", "unknown")
-                    result["tool_use_counts"][tool_name] += 1
-
-    # --- system 消息 ---
-    elif t == "system":
-        subtype = obj.get("subtype", "")
-        content = obj.get("content", "")
-        if subtype == "api_error":
-            result["api_errors"] += 1
-        if subtype in ("local_command", "api_error"):
-            result["system_events"].append({
-                "subtype": subtype,
-                "content": (content[:200] if isinstance(content, str) else ""),
-            })
-
-    # --- file-history-snapshot ---
-    elif t == "file-history-snapshot":
-        snap = obj.get("snapshot", {})
-        backups = snap.get("trackedFileBackups", {})
-        if backups:
-            files = list(backups.keys())
-            result["file_changes"].append({
-                "timestamp": snap.get("timestamp", ""),
-                "files": files,
-            })
-            result["file_change_set"].update(files)
-
-    # --- queue-operation ---
-    elif t == "queue-operation":
-        content = obj.get("content", "")
-        if content and content.strip():
-            result["queue_ops"].append({
-                "text": content.strip()[:500],
-                "timestamp": obj.get("timestamp", ""),
-            })
-
-    # --- custom-title / agent-name ---
-    elif t == "custom-title":
-        title = obj.get("customTitle", "")
-        if title:
-            result["session_title"] = title
-    elif t == "agent-name":
-        name = obj.get("agentName", "")
-        if name and not result["session_title"]:
-            result["session_title"] = name
+    if platform == "codex":
+        return extract_codex(filepath)
+    elif platform == "claude":
+        return extract_claude(filepath)
+    else:
+        print("WARNING: Unknown platform, trying codex")
+        return extract_codex(filepath)
 
 
 # ============================================================
@@ -383,7 +148,6 @@ def print_full(result):
     # --- LAST AGENT OUTPUTS ---
     if result["agent_texts"]:
         print("=" * 60)
-        # task_complete 优先展示
         task_completes = [a for a in result["agent_texts"] if a.get("is_task_complete")]
         regular = [a for a in result["agent_texts"] if not a.get("is_task_complete")]
 
@@ -513,7 +277,6 @@ def main():
         print(f"ERROR: File not found: {filepath}")
         sys.exit(1)
 
-    # Auto-detect platform if not specified
     if platform is None:
         platform = detect_platform(filepath)
         if platform == "unknown":
