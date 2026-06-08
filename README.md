@@ -4,28 +4,30 @@
 
 ## 用法
 
-不要在目标仓库里运行相对路径命令，除非当前目录就是本 skill 目录。推荐始终用 skill 脚本的绝对路径。
+`[path-to-skill]` 表示本 skill 的安装目录，即当前 `SKILL.md` 所在目录。
+不要在目标仓库里运行相对路径命令，除非当前目录就是本 skill 目录。
+推荐先定位 `[path-to-skill]`，再调用 `[path-to-skill]/scripts/...` 下的 bundled scripts。
 
 ```powershell
 # Windows PowerShell：按 session ID 自动定位并提取
-python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --session <session-id>
+python "[path-to-skill]/scripts/session_extract.py" --session <session-id>
 
 # Windows PowerShell：直接指定文件
-python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" <session.jsonl>
+python "[path-to-skill]/scripts/session_extract.py" <session.jsonl>
 
 # Windows PowerShell：只输出工作摘要
-python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --summary <session.jsonl>
+python "[path-to-skill]/scripts/session_extract.py" --summary <session.jsonl>
 ```
 
 ```bash
 # macOS/Linux：按 session ID 自动定位并提取
-python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" --session <session-id>
+python3 "[path-to-skill]/scripts/session_extract.py" --session <session-id>
 
 # macOS/Linux：直接指定文件
-python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" <session.jsonl>
+python3 "[path-to-skill]/scripts/session_extract.py" <session.jsonl>
 
 # macOS/Linux：只输出工作摘要
-python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" --summary <session.jsonl>
+python3 "[path-to-skill]/scripts/session_extract.py" --summary <session.jsonl>
 ```
 
 ## 平台支持
