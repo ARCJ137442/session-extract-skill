@@ -32,6 +32,7 @@ description: |
 | 问题 | 解决方案 |
 |------|----------|
 | Python 可执行名 | Windows: `python`，macOS/Linux: `python3` |
+| 脚本路径 | 从 skill 目录运行：`~/.claude/skills/session-extract/scripts/session_extract.py`，不要假定目标仓库有 `scripts/session_extract.py` |
 | 路径格式 | 脚本内用 `os.path.expanduser()` + `os.path.join()` |
 | 编码 | 统一 `encoding='utf-8'` |
 
@@ -43,16 +44,30 @@ description: |
 
 ### ① 定位文件
 
+> 下面的 `scripts/session_extract.py` 指的是本 skill 目录下的脚本，不是当前工作仓库的 `scripts/` 目录。执行时使用绝对路径，避免误跑到目标仓库。
+
+```powershell
+# Windows PowerShell：按 session ID 自动定位（推荐）
+python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --session <session-id>
+
+# Windows PowerShell：直接指定文件（自动检测平台）
+python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" <session.jsonl>
+
+# Windows PowerShell：强制指定平台
+python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --platform codex <file>
+python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --platform claude <file>
+```
+
 ```bash
-# 按 session ID 自动定位（推荐）
-python scripts/session_extract.py --session <session-id>
+# macOS/Linux：按 session ID 自动定位（推荐）
+python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" --session <session-id>
 
-# 直接指定文件（自动检测平台）
-python scripts/session_extract.py <session.jsonl>
+# macOS/Linux：直接指定文件（自动检测平台）
+python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" <session.jsonl>
 
-# 强制指定平台
-python scripts/session_extract.py --platform codex <file>
-python scripts/session_extract.py --platform claude <file>
+# macOS/Linux：强制指定平台
+python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" --platform codex <file>
+python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" --platform claude <file>
 ```
 
 脚本会自动搜索 `~/.codex/sessions/` 和 `~/.claude/projects/` 两个目录。
@@ -121,7 +136,7 @@ git branch
 
 ## 核心原则
 
-1. **脚本优先** — 收到 session ID 后，第一步必须是 `python scripts/session_extract.py --session <id>`。脚本搜不到再用手搜或其他方法。**Why:** Codex 会话文件名含 `rollout` 前缀和完整时间戳（如 `rollout-2026-06-03T09-16-01-<id>.jsonl`），手搜难以匹配，脚本内置跨平台递归定位一次命中。
+1. **脚本优先** — 收到 session ID 后，第一步必须运行本 skill 自带脚本，例如 Windows PowerShell: `python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --session <id>`；macOS/Linux: `python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" --session <id>`。脚本搜不到再用手搜或其他方法。**Why:** Codex 会话文件名含 `rollout` 前缀和完整时间戳（如 `rollout-2026-06-03T09-16-01-<id>.jsonl`），手搜难以匹配，脚本内置跨平台递归定位一次命中。
 2. **先验证，再报告** — 会话记录可能过时，核对 `git log` / `git status` 确认一致性
 3. **不加幻觉** — 没有 task_complete 就标注「逆推」
 4. **单次遍历** — 所有信息一次提取
@@ -147,6 +162,6 @@ git branch
 > 3. `find ~/.codex/sessions -name "*019e8b0d*"` → 无结果（因为 Codex 文件名带 rollout 前缀和时间戳）
 > 4. `find` 更广泛范围搜索 → 仍然无结果
 >
-> 最终用 `python scripts/session_extract.py --session 019e8b0d-...` **一次命中**，脚本在 `~/.codex/sessions/2026/06/03/` 下递归找到完整文件名 `rollout-2026-06-03T09-16-01-019e8b0d-...jsonl`。
+> 最终用本 skill 自带脚本 `python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --session 019e8b0d-...` **一次命中**，脚本在 `~/.codex/sessions/2026/06/03/` 下递归找到完整文件名 `rollout-2026-06-03T09-16-01-019e8b0d-...jsonl`。
 >
 > **教训**：脚本已内置递归搜索 + 文件名模式匹配，手搜只会浪费回合。先跑脚本，搜不到再想别的办法。
