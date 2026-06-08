@@ -4,15 +4,28 @@
 
 ## 用法
 
+不要在目标仓库里运行相对路径命令，除非当前目录就是本 skill 目录。推荐始终用 skill 脚本的绝对路径。
+
+```powershell
+# Windows PowerShell：按 session ID 自动定位并提取
+python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --session <session-id>
+
+# Windows PowerShell：直接指定文件
+python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" <session.jsonl>
+
+# Windows PowerShell：只输出工作摘要
+python "$HOME\.claude\skills\session-extract\scripts\session_extract.py" --summary <session.jsonl>
+```
+
 ```bash
-# 按 session ID 自动定位并提取
-python scripts/session_extract.py --session <session-id>
+# macOS/Linux：按 session ID 自动定位并提取
+python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" --session <session-id>
 
-# 直接指定文件
-python scripts/session_extract.py <session.jsonl>
+# macOS/Linux：直接指定文件
+python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" <session.jsonl>
 
-# 只输出工作摘要
-python scripts/session_extract.py --summary <session.jsonl>
+# macOS/Linux：只输出工作摘要
+python3 "$HOME/.claude/skills/session-extract/scripts/session_extract.py" --summary <session.jsonl>
 ```
 
 ## 平台支持
