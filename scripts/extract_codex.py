@@ -71,7 +71,9 @@ def _parse_session_meta(obj, result):
     p = obj.get("payload", {})
     git = p.get("git", {})
     result["session_info"] = {
-        "sessionId": "",
+        # payload.id is the canonical Codex thread identity (see
+        # session-review SKILL.md core rule 4) — never leave it empty.
+        "sessionId": p.get("id", ""),
         "cwd": p.get("cwd", ""),
         "branch": git.get("branch", ""),
         "commit": git.get("commit_hash", ""),
@@ -125,10 +127,18 @@ def _parse_turn_context(obj, result):
 
 
 def _parse_response_item(obj, result):
-    """工具调用: response_item.content 中的 tool_use 块。"""
+    """工具调用: 当前格式是 payload.type = function_call / custom_tool_call /
+    web_search_call；旧格式是 content 列表里的 tool_use 块，保留兼容。"""
     p = obj.get("payload", {})
+    pt = p.get("type", "")
+    if pt in ("function_call", "custom_tool_call"):
+        result["tool_use_counts"][p.get("name", "unknown")] += 1
+        return
+    if pt == "web_search_call":
+        result["tool_use_counts"]["web_search"] += 1
+        return
     content = p.get("content", [])
     if isinstance(content, list):
         for c in content:
-            if c.get("type") == "tool_use":
+            if isinstance(c, dict) and c.get("type") == "tool_use":
                 result["tool_use_counts"][c.get("name", "unknown")] += 1
