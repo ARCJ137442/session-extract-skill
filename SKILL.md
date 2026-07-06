@@ -23,9 +23,9 @@ description: |
 |------|-------|-------------|
 | 文件位置 | `~/.codex/sessions/YYYY/MM/DD/` | `~/.claude/projects/<project-dir>/` |
 | 核心恢复入口 | `task_complete`（Agent 自生成报告） | `file-history-snapshot`（文件变更链逆推） |
-| 元数据 | 第 1 行 `session_meta` | 首条 `user` 消息的 metadata |
+| 元数据 | 第 1 行 `session_meta`，SessionID 取 `payload.id` | 从任意事件字段补齐 `sessionId` / `cwd` / `gitBranch` / `version` |
 | Agent 输出 | `event_msg` 中的 `agent_message` | `assistant` 类型消息 |
-| 工具调用 | `response_item` 中的 `tool_use` | `assistant.message.content` 中的 `tool_use` |
+| 工具调用 | `response_item.payload.type` 为 `function_call` / `custom_tool_call` / `web_search_call`，并兼容旧 `content[].tool_use` | `assistant.message.content` 中的 `tool_use` |
 
 ## 跨平台注意
 
@@ -63,6 +63,7 @@ python "[path-to-skill]/scripts/session_extract.py" <session.jsonl>
 # Windows PowerShell：强制指定平台
 python "[path-to-skill]/scripts/session_extract.py" --platform codex <file>
 python "[path-to-skill]/scripts/session_extract.py" --platform claude <file>
+python "[path-to-skill]/scripts/session_extract.py" --json --session <session-id>
 ```
 
 ```bash
@@ -75,9 +76,11 @@ python3 "[path-to-skill]/scripts/session_extract.py" <session.jsonl>
 # macOS/Linux：强制指定平台
 python3 "[path-to-skill]/scripts/session_extract.py" --platform codex <file>
 python3 "[path-to-skill]/scripts/session_extract.py" --platform claude <file>
+python3 "[path-to-skill]/scripts/session_extract.py" --json --session <session-id>
 ```
 
 脚本会自动搜索 `~/.codex/sessions/` 和 `~/.claude/projects/` 两个目录。
+自动平台识别会优先看路径，并扫描前若干 JSONL 事件；Claude 文件不要求首行必须是 `user`。
 
 ### ② 单次提取
 
@@ -85,13 +88,18 @@ python3 "[path-to-skill]/scripts/session_extract.py" --platform claude <file>
 
 | Section | 说明 |
 |---------|------|
-| **SESSION INFO** | 平台、标题、分支、版本等 |
-| **STATISTICS** | 消息计数、文件变更数等 |
-| **TOOL USE DISTRIBUTION** | 工具调用频率 |
-| **USER MESSAGES** | 用户实际输入 |
-| **FILE CHANGE CHAIN** | 文件变更时间线 |
-| **AGENT OUTPUTS** | Agent 文本输出（含 task_complete） |
+| **SESSION INFO** | 平台、标题、SessionID（Codex 取 `session_meta.payload.id`）、分支、版本等 |
+| **STATISTICS** | 两个口径分开标注：raw 事件行数 vs 可读消息数；Codex 无文件快照，Files changed 显示 N/A |
+| **TOOL USE DISTRIBUTION** | 工具调用频率（Codex 新格式 `function_call`/`custom_tool_call` 与旧格式 `tool_use` 均支持） |
+| **USER MESSAGES** | 用户实际输入，显示 first 3 + last 5（交接时末尾几条才是当前状态）；系统提醒已过滤，user/local_command 中 slash command 包装只保留非空 `command-args` |
+| **FILE CHANGE CHAIN** | 按文件聚合：快照次数 + 首次/末次时间，不逐快照刷屏 |
+| **AGENT OUTPUTS** | Agent 文本输出（含 task_complete）；截断处显式标记 `…[截断]` |
+| **QUEUED OPERATIONS** | 用户排队输入（Claude Code），task-notification 等 harness 通知已过滤 |
 | **WORK INFERENCE** | 自动判断工作状态 |
+
+`--json` 输出同一提取结构的机器可读版本，`Counter` / `set` 会转成普通 JSON object / array，并补充 `readable_user_msgs` 派生计数；诊断提示写入 stderr，stdout 保持纯 JSON。`--help` / `-h` 是全局参数，和其他参数同现时也会优先显示帮助并以 0 退出。
+
+若出现「解析到 0 次工具调用但文件超过 1MB」警告，说明会话格式可能又演进了，工具统计不可信，需核对 JSONL 事件结构。
 
 ### ③ 核对仓库状态
 
@@ -155,9 +163,12 @@ git branch
 | 坑 | 表现 | 应对 |
 |----|------|------|
 | Codex 会话文件名不透明 | 文件名格式 `rollout-YYYY-MM-DDTHH-MM-SS-<session-id>.jsonl`，`find` 用 session ID 前缀搜不到 | 用 `--session <id>` 让脚本自动递归搜索 |
-| Codex JSONL 格式与文档描述不一致 | `replay_state.prompt_input` 才是用户消息，不是 `event_msg` | 脚本已处理；如需手动解析，先 `head -1` 看 `session_meta` 确认是 Codex 格式 |
+| Codex JSONL 格式可能演进 | 当前脚本读取 `event_msg/user_message` 作为用户消息；工具调用可能是新版 `response_item.payload.type`，也可能是旧 `content[].tool_use` | 脚本已双格式处理工具调用；如需手动解析，先 `head -1` 看 `session_meta`，再抽样检查 `payload.type` |
 | 大文件（>100MB）流式处理 | Codex 长会话 JSONL 可达 100MB+，`json.load` 全量读取会 OOM | 脚本逐行流式；手动提取也要逐行 `json.loads` |
-| 脚本 `--help` 不可用 | 脚本把未知参数当作文件路径解析，不识别 `--help` / `--all` | 查阅本 SKILL.md 作为唯一文档来源 |
+| 旧版脚本 `--help` / `--json` 不可用 | 历史版本会把未知参数当作文件路径解析 | 当前脚本已支持 `--help` 与 `--json`；若旧安装仍失败，先更新 skill |
+| Codex 工具调用格式演进 | 新版 rollout 用 `payload.type = function_call / custom_tool_call / web_search_call`，旧解析器只认 `content[].tool_use`，导致工具统计静默为 0（2026-07-05 案发并修复） | 脚本已双格式兼容；若再出现「0 工具调用 + 大文件」警告，重新核对事件结构 |
+| Claude JSONL 开头不是 user | 有些会话先出现 `mode` / `permission-mode` / snapshot，若只读首条 user 会导致 SessionID/CWD 为 N/A，甚至自动识别失败 | 脚本扫描前若干事件识别平台，并从任意事件补齐元信息；user/local_command 中 slash command 的真实意图从非空 `command-args` 提取 |
+| Claude inter-agent 噪音 | `Another Claude session sent a message:`、`<teammate-message>`、background agent stop 通知会伪装成 user/queue 事件 | 脚本过滤这些 harness/teammate 包装，只保留真实用户输入与非空 slash command 参数 |
 
 ### 反面教材：绕路3轮才回到脚本
 

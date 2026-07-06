@@ -12,7 +12,40 @@ Claude Code 会话格式是角色驱动的：
 
 核心价值点: file-history-snapshot（精确的文件变更链，用于逆推工作摘要）。
 """
+import html
+import re
 from collections import Counter
+
+
+# 与 session-review skill 的 scan_common.NOISE_PREFIXES 保持同步：
+# 命令包装 / 系统提醒 / 任务通知不是用户说的话，不进可读消息列表。
+NOISE_PREFIXES = (
+    "<local-command",
+    "<command",
+    "<system-reminder",
+    "<task-notification",
+    "<task-",
+    "<agent-message",
+    "<teammate-message",
+    "Another Claude session sent a message:",
+    "This came from another Claude session",
+    "Background agent ",
+    "Base directory for this skill:",
+    "```\nBase directory",
+)
+
+NOISE_PATTERNS = (
+    re.compile(r"^\d+\s+background agents?\s+(?:were\s+)?stopped\b", re.IGNORECASE),
+)
+
+
+def _is_noise(text):
+    stripped = (text or "").strip()
+    folded = stripped.casefold()
+    return (
+        any(folded.startswith(prefix.casefold()) for prefix in NOISE_PREFIXES)
+        or any(pattern.search(stripped) for pattern in NOISE_PATTERNS)
+    )
 
 
 def extract(filepath):
@@ -22,15 +55,12 @@ def extract(filepath):
     result = _empty_result()
 
     with open(filepath, "r", encoding="utf-8") as f:
-        first_line = True
         for line in f:
             import json
             obj = json.loads(line)
             t = obj.get("type", "")
 
-            if first_line and t == "user":
-                _parse_session_info(obj, result)
-                first_line = False
+            _parse_session_info(obj, result)
 
             if t == "user":
                 _parse_user(obj, result)
@@ -44,9 +74,6 @@ def extract(filepath):
                 _parse_queue_op(obj, result)
             elif t in ("custom-title", "agent-name"):
                 _parse_title(obj, result)
-
-            if first_line:
-                first_line = False
 
     return result
 
@@ -74,14 +101,28 @@ def _empty_result():
 
 
 def _parse_session_info(obj, result):
-    """首条 user 消息 → 会话元信息。"""
-    result["session_info"] = {
-        "sessionId": obj.get("sessionId", ""),
-        "cwd": obj.get("cwd", ""),
-        "branch": obj.get("gitBranch", ""),
-        "version": obj.get("version", ""),
-        "entrypoint": obj.get("entrypoint", ""),
+    """从任意事件补齐会话元信息；有些 Claude JSONL 前几行不是 user。"""
+    info = result["session_info"]
+    if not info:
+        info.update({
+            "sessionId": "",
+            "cwd": "",
+            "branch": "",
+            "version": "",
+            "entrypoint": "",
+        })
+
+    field_map = {
+        "sessionId": "sessionId",
+        "cwd": "cwd",
+        "gitBranch": "branch",
+        "version": "version",
+        "entrypoint": "entrypoint",
     }
+    for source_key, target_key in field_map.items():
+        value = obj.get(source_key, "")
+        if value and not info.get(target_key):
+            info[target_key] = value
 
 
 def _parse_user(obj, result):
@@ -97,21 +138,51 @@ def _parse_user(obj, result):
             if c.get("type") == "tool_result":
                 result["total_tool_results"] += 1
             elif c.get("type") == "text":
-                text = c.get("text", "").strip()
+                text = _readable_user_text(c.get("text", ""))
                 if text:
-                    result["user_msgs"].append({
-                        "text": text[:2000],
-                        "isMeta": is_meta,
-                        "timestamp": ts,
-                    })
+                    _append_user_msg(result, text, is_meta, ts)
     elif isinstance(content, str):
-        text = content.strip()
+        text = _readable_user_text(content)
         if text:
-            result["user_msgs"].append({
-                "text": text[:2000],
-                "isMeta": is_meta,
-                "timestamp": ts,
-            })
+            _append_user_msg(result, text, is_meta, ts)
+
+
+def _append_user_msg(result, text, is_meta, timestamp):
+    """合并堆叠 slash command 展开产生的相邻重复指令。"""
+    if result["user_msgs"]:
+        prev = result["user_msgs"][-1]
+        if prev["text"] == text[:2000] and prev["timestamp"][:19] == timestamp[:19]:
+            return
+    result["user_msgs"].append({
+        "text": text[:2000],
+        "isMeta": is_meta,
+        "timestamp": timestamp,
+    })
+
+
+def _readable_user_text(text):
+    """保留 slash command 的真实参数，过滤 wrapper 本体。
+
+    Claude 把 `/goal xxx` 等命令记录为 XML-like wrapper；wrapper 是噪音，
+    但 command-args 往往正是用户指令，交接时不能丢。
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    command_args = _extract_command_args(text)
+    if command_args:
+        return command_args
+    if _is_noise(text):
+        return ""
+    return text
+
+
+def _extract_command_args(text):
+    match = re.search(r"<command-args>(.*?)</command-args>", text, flags=re.DOTALL)
+    if not match:
+        return ""
+    args = html.unescape(match.group(1)).strip()
+    return " ".join(args.split())
 
 
 def _parse_assistant(obj, result):
@@ -125,10 +196,14 @@ def _parse_assistant(obj, result):
         for c in content:
             if c.get("type") == "text":
                 text = c.get("text", "").strip()
-                if text:
+                if text and not _is_assistant_noise(text):
                     result["agent_texts"].append({"text": text[:2000], "timestamp": ts})
             elif c.get("type") == "tool_use":
                 result["tool_use_counts"][c.get("name", "unknown")] += 1
+
+
+def _is_assistant_noise(text):
+    return (text or "").strip() in {"No response requested."}
 
 
 def _parse_system(obj, result):
@@ -137,6 +212,10 @@ def _parse_system(obj, result):
     content = obj.get("content", "")
     if subtype == "api_error":
         result["api_errors"] += 1
+    if subtype == "local_command" and isinstance(content, str):
+        command_args = _extract_command_args(content)
+        if command_args:
+            _append_user_msg(result, command_args, False, obj.get("timestamp", ""))
     if subtype in ("local_command", "api_error"):
         result["system_events"].append({
             "subtype": subtype,
@@ -158,13 +237,18 @@ def _parse_file_snapshot(obj, result):
 
 
 def _parse_queue_op(obj, result):
-    """排队操作: 用户在 Agent 忙时追加的输入。"""
+    """排队操作: 用户在 Agent 忙时追加的输入。
+
+    task-notification 等 harness 通知也走 queue-operation 事件，
+    但那不是用户输入，过滤掉；多行内容压成单行便于列表展示。"""
     content = obj.get("content", "")
-    if content and content.strip():
-        result["queue_ops"].append({
-            "text": content.strip()[:500],
-            "timestamp": obj.get("timestamp", ""),
-        })
+    text = content.strip() if content else ""
+    if not text or _is_noise(text):
+        return
+    result["queue_ops"].append({
+        "text": " ".join(text.split())[:500],
+        "timestamp": obj.get("timestamp", ""),
+    })
 
 
 def _parse_title(obj, result):
