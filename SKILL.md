@@ -1,11 +1,12 @@
 ---
 name: session-extract
 description: |
-  Use when a user provides a session ID or session JSONL file from another Agent
-  (Codex or Claude Code) and needs to understand and continue that work.
+  Use when a user provides a session ID, session JSONL file, or a DeepSeek
+  export bundle and needs to understand and continue that work.
   Also triggered by phrases like "恢复上下文", "接手工作", "之前做到哪了",
-  "从聊天记录恢复", "交接", "handoff".
-  Automatically detects the platform (Codex vs Claude Code) from the session file.
+  "从聊天记录恢复", "交接", "handoff", "打捞会话", "找回聊天记录".
+  Automatically detects the platform (Codex / Claude Code / DeepSeek) from the
+  session file, and can search a whole DeepSeek corpus by topic keyword.
   NOT when the current conversation already has sufficient context.
 ---
 
@@ -13,19 +14,25 @@ description: |
 
 ## 概述
 
-**核心能力**：从 Codex 或 Claude Code 的会话 JSONL 文件中提取上下文，自动检测平台，生成结构化的交接报告。
+**核心能力**：从 Codex、Claude Code 的会话 JSONL 文件或 DeepSeek 导出包中提取上下文，
+自动检测平台，生成结构化的交接报告。
 
-一个脚本覆盖两个平台，通过 session ID 自动定位文件并检测格式。
+一个脚本覆盖三个平台，通过 session ID 自动定位文件并检测格式；
+DeepSeek 导出包是**单文件装全部会话**，另提供「按话题检索整个语料库」的能力。
 
 ## 平台差异
 
-| 维度 | Codex | Claude Code |
-|------|-------|-------------|
-| 文件位置 | `~/.codex/sessions/YYYY/MM/DD/` | `~/.claude/projects/<project-dir>/` |
-| 核心恢复入口 | `task_complete`（Agent 自生成报告） | `file-history-snapshot`（文件变更链逆推） |
-| 元数据 | 第 1 行 `session_meta` | 首条 `user` 消息的 metadata |
-| Agent 输出 | `event_msg` 中的 `agent_message` | `assistant` 类型消息 |
-| 工具调用 | `response_item` 中的 `tool_use` | `assistant.message.content` 中的 `tool_use` |
+| 维度 | Codex | Claude Code | DeepSeek |
+|------|-------|-------------|----------|
+| 文件位置 | `~/.codex/sessions/YYYY/MM/DD/` | `~/.claude/projects/<project-dir>/` | 导出包内的 `conversations.json`（**单文件装全部会话**） |
+| 会话结构 | 线性 JSONL | 线性 JSONL | **聊天树**（`mapping`，节点带 `parent`/`children`） |
+| 定位方式 | session ID | session ID | **关键词 → 全语料检索**（标题只是自动摘要，靠不住） |
+| 标题 | 原始标题 | 原始 / `custom-title` | **自动生成的摘要**，常与用户记忆的措辞不符 |
+| 核心恢复入口 | `task_complete`（Agent 自生成报告） | `file-history-snapshot`（文件变更链逆推） | fragment 正文全文检索 + 聊天树线性化 |
+| 元数据 | 第 1 行 `session_meta` | 首条 `user` 消息的 metadata | 会话对象 `{id, title, inserted_at, updated_at, mapping}` |
+| Agent 输出 | `event_msg` 中的 `agent_message` | `assistant` 类型消息 | `RESPONSE` fragment（`THINK` 是思考链） |
+| 工具调用 | `response_item` 中的 `tool_use` | `assistant.message.content` 中的 `tool_use` | `TOOL_SEARCH`/`SEARCH` fragment（`TOOL_OPEN`/`TOOL_FIND` **载荷未导出**） |
+| 快照时效 | 实时落盘 | 实时落盘 | **导出时刻的快照，可能滞后于最新会话** |
 
 ## 跨平台注意
 
@@ -35,6 +42,7 @@ description: |
 | 脚本路径 | 先定位 `[path-to-skill]`，再运行 `[path-to-skill]/scripts/session_extract.py`，不要假定目标仓库有 `scripts/session_extract.py` |
 | 路径格式 | 脚本内用 `os.path.expanduser()` + `os.path.join()` |
 | 编码 | 统一 `encoding='utf-8'` |
+| 隔离模式 `python -I` | 解释器**不会**把脚本目录放进 `sys.path`，`from extract_codex import ...` 会 `ModuleNotFoundError`；脚本已显式 `sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))` 兜底 |
 
 ## 脚本路径约定
 
@@ -79,6 +87,9 @@ python3 "[path-to-skill]/scripts/session_extract.py" --platform claude <file>
 
 脚本会自动搜索 `~/.codex/sessions/` 和 `~/.claude/projects/` 两个目录。
 
+> DeepSeek 导出包**没有** session ID 定位这一说——它是单文件装全部会话，
+> 走下面「语料库检索模式」和「DeepSeek 打捞模式」。
+
 ### ② 单次提取
 
 脚本输出统一格式：
@@ -92,6 +103,73 @@ python3 "[path-to-skill]/scripts/session_extract.py" --platform claude <file>
 | **FILE CHANGE CHAIN** | 文件变更时间线 |
 | **AGENT OUTPUTS** | Agent 文本输出（含 task_complete） |
 | **WORK INFERENCE** | 自动判断工作状态 |
+
+## 语料库检索模式（DeepSeek 导出包）
+
+**触发场景**：用户只记得**话题**，不记得会话 ID，也不知道标题长什么样。
+这是 DeepSeek 场景的常态——它的标题是自动生成的摘要，跟用户记忆里的措辞经常对不上。
+
+```powershell
+# Windows PowerShell：按关键词检索整个语料库（--kw 可重复）
+python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --kw 上传 --kw 同步
+
+# 限制条数 / 输出机器可读 JSON
+python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --top 10 --json
+```
+
+```bash
+# macOS/Linux
+python3 "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --kw 上传 --kw 同步
+```
+
+打分规则（`scripts/extract_deepseek.py` 的 `scan_corpus`）：
+
+| 维度 | 做法 | 为什么 |
+|------|------|--------|
+| 正文命中 | fragment 的 `content` + `results[].title/url` + `files[].file_name` 全量计数 | 用户记忆里的原话通常只在正文 |
+| 标题命中 | 视作该关键词**额外命中 100 次** | 标题是自动摘要，命中标题 ≈ 这场对话就是在讲它 |
+| 词频惩罚 | 按 IDF 加权（`log((N+1)/(df+1))+1`） | 「同步」「上传」这类通用词命中再多，也不该压过「某同步插件」这种专有词 |
+| 命中位置 | 记录 `keyword@FRAGMENT_TYPE` | 一眼分辨「真话题」还是「顺带提到」 |
+| 大小写 | 不敏感 | `某同步插件` / `某专有词小写` / `某专有词全大写` 都要命中 |
+
+输出按加权得分降序，**同分时标题命中多的优先，再同则更新的会话优先**。
+检索结果里 `title_match` 非空的，就是真·主题候选。
+
+### DeepSeek 打捞模式
+
+检索出候选 ID 后，打捞成**独立 JSON 文件**（schema `rescued-session/v1`）：
+
+```powershell
+# Windows PowerShell
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id>,<会话 id> --out <out.json> --reason "打捞原因" --markdown --verify
+
+# 一个会话一份文件（+ .md 预览 + 附件清单）
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id>,<会话 id> --outdir <dir> --markdown
+```
+
+| 参数 | 说明 |
+|------|------|
+| `--ids <id>[,<id>]` | 会话 ID 或 ID 前缀，逗号分隔（与 `--scan` 结果配合使用） |
+| `--all` | 导出全部会话（慎用，语料大时产物很大） |
+| `--out <path>` | 输出**单个** JSON（所有会话装一起），默认 `rescued_deepseek.json`（当前目录） |
+| `--outdir <dir>` | **一个会话一份文件**（`<日期>_<id前8位>_<标题>.json`），与交付产物布局一致 |
+| `--reason "<text>"` | 打捞原因，写进产物的 `rescue_reason`，方便日后回溯 |
+| `--markdown` | 额外写一份 `.md` 预览（跳过 `THINK`，搜索结果渲染成链接列表） |
+| `--verify` | 跑**多重集比较**自证：transcript vs 源 mapping，无丢失、无重复则 PASS |
+
+产物结构：
+
+```
+_meta           # schema / platform / source(file, sha256, conversation_count_in_source) / extraction
+conversations[] # id, title, inserted_at, updated_at, rescue_reason, stats, attachments, transcript, raw_mapping
+```
+
+`transcript` 是**给人读的线性视图**（聊天树从 `root` 深度优先线性化，含 `seq`/`depth`/`role`/`label`），
+`raw_mapping` 是**给机器兜底的原始结构**（逐字保留）。两个都留，任何重新分析都不丢信息。
+
+`attachments` 是附件清单（`file_id` / `file_name` / `file_size_bytes` / 对应问题）。
+**注意：DeepSeek 导出只存附件元数据，图片二进制不在导出包里**——有附件时会额外写一份
+`<base>_attachments.json`，明说「缺了什么、每个附件回答的是哪一问」。
 
 ### ③ 核对仓库状态
 
@@ -139,16 +217,25 @@ git branch
     │   ├─ YES → 从文件变更链逆推
     │   └─ NO → 从 assistant 文本输出推断
     └─ 需要深入 tool_use 记录
+
+文件是 DeepSeek 导出包（首字符是 '['）？
+└─ YES → 用户记得话题吗？
+    ├─ 记得 → --scan --kw <关键词> 检索语料库 → 候选给用户挑
+    └─ 不记得 → --scan 用泛词试探（如同步 / 上传 / 报错）→ 看 title_match 收敛
+        → 定位后 --platform deepseek --ids <id> 打捞 → --verify 自证
 ```
 
 ## 核心原则
 
-1. **脚本优先** — 收到 session ID 后，第一步必须运行本 skill 自带脚本，例如 Windows PowerShell: `python "[path-to-skill]/scripts/session_extract.py" --session <id>`；macOS/Linux: `python3 "[path-to-skill]/scripts/session_extract.py" --session <id>`。脚本搜不到再用手搜或其他方法。**Why:** Codex 会话文件名含 `rollout` 前缀和完整时间戳（如 `rollout-2026-06-03T09-16-01-<id>.jsonl`），手搜难以匹配，脚本内置跨平台递归定位一次命中。
+1. **脚本优先** — 收到 session ID 后，第一步必须运行本 skill 自带脚本，例如 Windows PowerShell: `python "[path-to-skill]/scripts/session_extract.py" --session <id>`；macOS/Linux: `python3 "[path-to-skill]/scripts/session_extract.py" --session <id>`。脚本搜不到再用手搜或其他方法。**Why:** Codex 会话文件名含 `rollout` 前缀和完整时间戳（如 `rollout-2026-06-03T09-16-01-<id>.jsonl`），手搜难以匹配，脚本内置跨平台递归定位一次命中。DeepSeek 场景同理：先 `--scan --kw <关键词>`，别手撸 grep。
 2. **先验证，再报告** — 会话记录可能过时，核对 `git log` / `git status` 确认一致性
 3. **不加幻觉** — 没有 task_complete 就标注「逆推」
 4. **单次遍历** — 所有信息一次提取
 5. **空值过滤** — 过滤空消息
 6. **不破坏已有工作** — 只读取不写入
+7. **忠实优先于美化** — 线性化只是**视图**，不是**替换**。打捞产物必须保留原始结构（DeepSeek 的 `raw_mapping`）作为兜底，任何重分析都从那份原始数据来。**Why:** 聊天树一旦被"整理"成线性消息，分支归属信息就永久丢了；而用户事后往往需要回到原树核对。
+8. **打捞后必须自证** — 打捞完立刻跑多重集比较（`--verify`）：源 fragment 签名多重集 == 产物 transcript 多重集，且 `raw_mapping` 与源逐字相等。只比长度不算数——长度相同也可能是"丢一个重复一个"。**Why:** 静默丢数据比报错更危险，用户不会发现少了一段。
+9. **不臆造** — 目标会话不在导出里时，如实报告"不在本次导出中"，并附证据（md5 / 命中计数 / 数据时间边界），把候选全部交给用户挑，而不是拿一个"最像的"糊弄过去。
 
 ## 已知坑与应对
 
@@ -157,7 +244,12 @@ git branch
 | Codex 会话文件名不透明 | 文件名格式 `rollout-YYYY-MM-DDTHH-MM-SS-<session-id>.jsonl`，`find` 用 session ID 前缀搜不到 | 用 `--session <id>` 让脚本自动递归搜索 |
 | Codex JSONL 格式与文档描述不一致 | `replay_state.prompt_input` 才是用户消息，不是 `event_msg` | 脚本已处理；如需手动解析，先 `head -1` 看 `session_meta` 确认是 Codex 格式 |
 | 大文件（>100MB）流式处理 | Codex 长会话 JSONL 可达 100MB+，`json.load` 全量读取会 OOM | 脚本逐行流式；手动提取也要逐行 `json.loads` |
-| 脚本 `--help` 不可用 | 脚本把未知参数当作文件路径解析，不识别 `--help` / `--all` | 查阅本 SKILL.md 作为唯一文档来源 |
+| 脚本 `--help` 不可用 | 脚本把未知参数当作文件路径解析，不识别 `--help` | 查阅本 SKILL.md 作为唯一文档来源 |
+| **DeepSeek 标题是自动摘要** | 标题由 DeepSeek 自动生成，和用户记忆里的措辞经常对不上；用户报的原话可能在正文里，一个字都不在标题里 | **必须搜正文**：`--scan --kw <关键词>` 扫全语料 fragment 正文 + 标题，标题命中只是加权项，不能只搜标题 |
+| **DeepSeek 导出包是某一时刻的快照** | 用户以为"今天导出的"一定是最新的，实际可能和几天前那份**完全相同**（实战中 10-23 与 10-29 两个包 md5 一模一样），目标会话根本没在里面 | 报告时附上 `updated_at` 时间边界与源文件 sha256；建议用户重新导出。**不要**因为"没搜到"就断言用户记错了 |
+| **DeepSeek 聊天树不是列表** | `mapping` 是树，重新生成答案会 fork 出兄弟分支；朴素遍历 `mapping.values()` 会把两条矛盾分支拼在一起 | 从 `root` 深度优先线性化，并补捞 root 不可达的孤儿节点（脚本已实现） |
+| **DeepSeek `TOOL_OPEN`/`TOOL_FIND` 载荷未导出** | 这两类 fragment 只有 `type`，没有 `content`/`results` | 如实告知用户这是导出本身的信息损失，无法补救；不要假装"内容都在" |
+| **DeepSeek 附件只有元数据** | `FILE` fragment 只记 `{file_id, file_name, file_size}`，导出 zip 里**没有**图片二进制 | 产物里的 `attachments` 清单要说清「缺了什么、每个附件回答的是哪一问」，并提醒用户回客户端重新抓图 |
 
 ### 反面教材：绕路3轮才回到脚本
 
@@ -172,3 +264,32 @@ git branch
 > 最终用本 skill 自带脚本 `python "[path-to-skill]/scripts/session_extract.py" --session <session-uuid>-...` **一次命中**，脚本在 `~/.codex/sessions/2026/06/03/` 下递归找到完整文件名 `rollout-2026-06-03T09-16-01-<session-uuid>-...jsonl`。
 >
 > **教训**：脚本已内置递归搜索 + 文件名模式匹配，手搜只会浪费回合。先跑脚本，搜不到再想别的办法。
+
+### 实战案例：DeepSeek 导出包会话打捞
+
+> **场景** (2026-10-29)：用户要从 DeepSeek 网页版导出的 `conversations.json`（较少条会话）里
+> 找回一条「某笔记软件 某同步插件 的设备卡在『状态显示为只能下载不能上传』，只能下载没法上传」的会话。
+> 用户报的是标题，导出里的标题是 `目标会话` / `目标会话` —— **一个字都对不上**。
+
+**处理过程**：
+
+1. **先搜，别猜**。`--scan --kw 某同步插件 --kw 上传 --kw 同步` 扫全语料 较少条会话的 fragment 正文，
+   出来两个 `title_match=['某专有词小写']` 的候选（`<会话 id>` / `<会话 id>`），
+   外加一堆只命中通用词「上传」的无关会话（如 `某无关会话`）。
+   → **标题命中是区分「真话题」和「顺带提到」的关键信号**，必须把 `title_match` 一起看。
+2. **用户报的原话搜不到**。`grep -F "1 Sync"` 在整个导出里 0 命中。
+   查源文件 md5 → 发现 10-23 与 10-29 两份导出**完全相同**，数据止于 `updated_at = 2026-10-23`。
+   → 如实报告「你报的这条不在本次导出里」+ 附证据，**不拿最像的糊弄**，同时把全部候选交给用户挑。
+3. **打捞并自证**。`--platform deepseek --ids <会话 id>,<会话 id>` 产出 `rescued-session/v1` JSON，
+   `--verify` 做多重集比较：源 fragment 签名多重集 == 产物 transcript 多重集，`raw_mapping` 与源逐字相等 → **PASS**。
+4. **后来导出更新了**。源文件换成新一版（332 条，`updated_at` 到 2026-10-29），
+   同一套 `--scan` 直接把目标会话 `<会话 id>`「目标会话」排在**第 1 位**——
+   正文里赫然就是「状态显示为只能下载不能上传」那一句。
+   → **快照滞后不是结论，是待验证的假设**：先查 md5 和时间边界，再建议重新导出。
+
+**教训**：
+
+- 只搜标题 = 什么都搜不到。**搜正文**。
+- 通用词（「同步」「上传」）命中再多也不是话题；**标题命中 + IDF 加权**才能把真候选顶上来。
+- 导出包是快照，**先证明数据边界，再下结论**。
+- 打捞完必须 `--verify`：**没丢没重**要拿证据说，不能靠"看着对"。

@@ -1,6 +1,7 @@
 # session-extract
 
-从 Codex 或 Claude Code 会话 JSONL 文件中提取上下文，自动检测平台，生成结构化交接报告。
+从 Codex / Claude Code 的会话 JSONL 文件，或 DeepSeek 导出的 `conversations.json` 中提取上下文，
+自动检测平台，生成结构化的交接报告。
 
 ## 用法
 
@@ -30,9 +31,54 @@ python3 "[path-to-skill]/scripts/session_extract.py" <session.jsonl>
 python3 "[path-to-skill]/scripts/session_extract.py" --summary <session.jsonl>
 ```
 
+## DeepSeek 导出包（单文件装全部会话）
+
+DeepSeek 的「导出数据」是一个 `conversations.json`，里面是该账号的**全部**会话，
+内部是**聊天树**（`mapping`），不是线性消息数组——所以需要单独的提取器。
+
+**只记得话题、不记得 ID 或标题时**（DeepSeek 标题是自动摘要，常与用户记忆的措辞不符）：
+
+```powershell
+# 按关键词检索整个语料库（--kw 可重复）
+python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --kw 上传 --kw 同步
+
+# 定位后打捞成独立 JSON，并跑多重集比较自证
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id>,<会话 id> --out <out.json> --reason "打捞原因" --markdown --verify
+
+# 一个会话一份文件（+ .md 预览 + 附件清单）
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id> --outdir <dir> --markdown
+```
+
+```bash
+# macOS/Linux
+python3 "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --kw 上传 --kw 同步
+python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id> --out <out.json> --verify
+```
+
+产物 schema `rescued-session/v1`：`transcript` 是聊天树线性化后的可读视图，
+`raw_mapping` 原样保留原始结构作为兜底，`attachments` 是附件元数据清单
+（**图片二进制不在导出包里**，需要回客户端重新抓）。
+
 ## 平台支持
 
 | 平台 | 文件位置 | 核心恢复方式 |
 |------|----------|-------------|
 | Codex | `~/.codex/sessions/` | `task_complete` 事件 |
 | Claude Code | `~/.claude/projects/` | 文件变更链逆推 |
+| DeepSeek | 导出包内 `conversations.json` | 全语料关键词检索 + 聊天树线性化 |
+
+## 脚本
+
+| 脚本 | 作用 |
+|------|------|
+| `scripts/session_extract.py` | 调度器：定位 + 平台探测 + 分发；DeepSeek 的 `--scan` / `--platform deepseek` 入口 |
+| `scripts/extract_codex.py` | Codex 提取器，`extract(filepath) -> dict` |
+| `scripts/extract_claude.py` | Claude Code 提取器，`extract(filepath) -> dict` |
+| `scripts/extract_deepseek.py` | DeepSeek 提取器：schema 解析、树线性化、语料检索、附件清单、`extract(filepath, ids, reason) -> dict`、多重集校验 |
+
+## 注意事项
+
+- Windows 用 `python`，macOS/Linux 用 `python3`。
+- `python -I`（隔离模式）下解释器不会把脚本目录放进 `sys.path`，脚本已显式兜底。
+- 所有文件读取统一 `encoding='utf-8'`；路径统一用 `os.path.expanduser()` / `os.path.join()`。
+- 详细的坑、原则、实战案例见 `SKILL.md`。

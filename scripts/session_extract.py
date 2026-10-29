@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified Session Extractor — 支持 Codex 和 Claude Code 两种会话格式。
+Unified Session Extractor — 支持 Codex、Claude Code 和 DeepSeek 三种会话格式。
 
 自动检测平台，单次遍历提取上下文。
 
@@ -9,14 +9,23 @@ Unified Session Extractor — 支持 Codex 和 Claude Code 两种会话格式。
     python session_extract.py <session.jsonl>
     python session_extract.py --summary <session.jsonl>
     python session_extract.py --platform codex|claude <file>
+    python session_extract.py --platform deepseek <conversations.json> --ids <id>[,<id>] --out <out.json>
+    python session_extract.py --platform deepseek <conversations.json> --ids <id>[,<id>] --outdir <dir>
+    python session_extract.py --scan <conversations.json> --kw 某同步插件 --kw 上传
 """
 import json
 import os
 import sys
 import glob
 
+# 脚本同目录的兄弟模块（extract_codex / extract_claude / extract_deepseek）。
+# 用 `python -I`（隔离模式）运行时，解释器不会把脚本目录放进 sys.path，
+# 这里显式补上，否则 `from extract_codex import ...` 会 ModuleNotFoundError。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from extract_codex import extract as extract_codex
 from extract_claude import extract as extract_claude
+import extract_deepseek
 
 
 # ============================================================
@@ -47,13 +56,35 @@ def find_session(session_id, home=None):
 
 
 def detect_platform(filepath):
-    """通过文件首行检测平台。"""
+    """
+    通过文件内容检测平台。
+
+    Codex / Claude Code 是 JSONL（一会话一行），看第一行即可；
+    DeepSeek 导出包是**单个 JSON 数组**装下全部会话（首字符是 '['），
+    或者单会话 JSON 对象（含 'mapping' 键）。
+    """
     with open(filepath, "r", encoding="utf-8") as f:
-        first = json.loads(f.readline())
+        head = f.read(4096).lstrip("\ufeff \t\r\n")
+        if not head:
+            raise ValueError("empty file: {}".format(filepath))
+        if head.startswith("["):
+            return "deepseek"
+        f.seek(0)
+        try:
+            first = json.loads(f.readline())
+        except ValueError:
+            # 整个文件是一个 JSON 对象（单会话 DeepSeek 导出）
+            f.seek(0)
+            first = json.load(f)
+
+    if not isinstance(first, dict):
+        return "unknown"
     if first.get("type") == "session_meta":
         return "codex"
     elif first.get("type") == "user" and "sessionId" in first:
         return "claude"
+    elif "mapping" in first:
+        return "deepseek"
     return "unknown"
 
 
@@ -66,6 +97,8 @@ def extract(filepath, platform=None):
         return extract_codex(filepath)
     elif platform == "claude":
         return extract_claude(filepath)
+    elif platform == "deepseek":
+        return extract_deepseek.extract(filepath)
     else:
         print("WARNING: Unknown platform, trying codex")
         return extract_codex(filepath)
@@ -222,24 +255,220 @@ def print_summary_only(result):
 
 
 # ============================================================
+# DeepSeek: 语料库检索 + 打捞
+# ============================================================
+
+def print_scan(results, keywords, corpus_count):
+    """语料库检索结果（人类可读）。"""
+    print(f"corpus: {corpus_count} conversations | keywords: {keywords}")
+    print("-" * 70)
+    if not results:
+        print("no hit")
+        return
+    for r in results:
+        print(f"[{r['score']:>9.1f}] {str(r['id'])[:8]} | {str(r['inserted_at'])[:10]} "
+              f"| {r['title']}")
+        print(f"        body_hits={r['hits']} title_match={r['title_match']}")
+        loc = ", ".join(f"{k}:{v}" for k, v in r["hit_locations"].items())
+        print(f"        where={loc}")
+
+
+def print_deepseek_summary(result):
+    """打捞产物摘要。"""
+    meta = result.get("_meta", {})
+    src = meta.get("source", {})
+    print("=" * 60)
+    print("RESCUED SESSION (deepseek-web-export)")
+    print(f"  Source file:   {src.get('file')}")
+    print(f"  Source sha256: {src.get('sha256')}")
+    print(f"  Conversations: {meta.get('conversation_count')} / "
+          f"{src.get('conversation_count_in_source')} in source")
+    reason = meta.get("extraction", {}).get("rescue_reason")
+    if reason:
+        print(f"  Reason:        {reason}")
+    print()
+    for c in result.get("conversations", []):
+        st = c.get("stats", {})
+        print("=" * 60)
+        print(f"  id:       {c.get('id')}")
+        print(f"  title:    {c.get('title')}")
+        print(f"  inserted: {c.get('inserted_at')}")
+        print(f"  updated:  {c.get('updated_at')}")
+        print(f"  fragments:{st.get('fragment_count')} "
+              f"(user {st.get('user_turn_count')} / assistant {st.get('assistant_turn_count')} / "
+              f"think {st.get('thinking_count')} / tool {st.get('tool_fragment_count')})")
+        print(f"  by_type:  {st.get('by_type')}")
+        print(f"  chars:    {st.get('content_chars')}")
+        print()
+
+
+def run_scan(scan_file, keywords, top, as_json):
+    """语料库检索模式。"""
+    if not keywords:
+        print("ERROR: --scan 需要至少一个 --kw <keyword>")
+        sys.exit(1)
+    corpus = extract_deepseek.load_corpus(scan_file)
+    results = extract_deepseek.scan_corpus(corpus, keywords, top)
+    if as_json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+    else:
+        print_scan(results, keywords, len(corpus))
+    return 0
+
+
+def _write_json(path, obj):
+    """统一按 UTF-8 + 不转义中文写 JSON。"""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False, indent=2)
+
+
+def attachment_manifest(meta, conv):
+    """
+    附件清单。
+
+    DeepSeek 导出只存附件**元数据**（file_id / file_name / file_size），
+    图片二进制不在导出包里——这份清单说明「缺了什么、每个附件回答的是哪一问」。
+    """
+    return {
+        "_meta": meta,
+        "conversation_id": conv.get("id"),
+        "conversation_title": conv.get("title"),
+        "note": (
+            "DeepSeek export stores attachment METADATA ONLY "
+            "(file_id / file_name / file_size). The image bytes are NOT in "
+            "the export zip - they must be re-fetched from the DeepSeek client."
+        ),
+        "attachments": conv.get("attachments") or [],
+    }
+
+
+def run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason, markdown, verify):
+    """DeepSeek 打捞：抽出指定会话，写成独立 JSON（必要时附 .md 预览和附件清单）。"""
+    if not ids and not extract_all:
+        print("ERROR: --platform deepseek 需要 --ids <id>[,<id>...] 或 --all")
+        print("  不知道 ID 时先用：--scan <conversations.json> --kw <关键词>")
+        sys.exit(1)
+
+    try:
+        result = extract_deepseek.extract(filepath, ids=ids or None, reason=reason)
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(2)
+
+    meta = result.get("_meta", {})
+    convs = result.get("conversations", [])
+
+    if outdir:
+        # 一个会话一份文件（+ .md 预览 + 附件清单），与交付产物布局一致
+        outdir = os.path.abspath(outdir)
+        os.makedirs(outdir, exist_ok=True)
+        for c in convs:
+            base = extract_deepseek.safe_filename(c)
+            jp = os.path.join(outdir, base + ".json")
+            _write_json(jp, {"_meta": meta, "conversations": [c]})
+            print(f"wrote {jp}")
+            if c.get("attachments"):
+                ap_ = os.path.join(outdir, base + "_attachments.json")
+                _write_json(ap_, attachment_manifest(meta, c))
+                print(f"wrote {ap_}")
+            if markdown:
+                mp = os.path.join(outdir, base + ".md")
+                extract_deepseek.write_markdown(mp, c)
+                print(f"wrote {mp}")
+    else:
+        out_path = os.path.abspath(out or "rescued_deepseek.json")
+        out_dir = os.path.dirname(out_path)
+        if out_dir and not os.path.isdir(out_dir):
+            os.makedirs(out_dir, exist_ok=True)
+        _write_json(out_path, result)
+        print(f"wrote {out_path}")
+
+        with_attachments = [c for c in convs if c.get("attachments")]
+        if with_attachments:
+            ap_ = os.path.splitext(out_path)[0] + "_attachments.json"
+            _write_json(ap_, {
+                "_meta": meta,
+                "conversation_count": len(with_attachments),
+                "conversations": [
+                    {
+                        "conversation_id": c.get("id"),
+                        "conversation_title": c.get("title"),
+                        "note": attachment_manifest(meta, c)["note"],
+                        "attachments": c.get("attachments") or [],
+                    }
+                    for c in with_attachments
+                ],
+            })
+            print(f"wrote {ap_}")
+
+        if markdown:
+            base = os.path.splitext(out_path)[0]
+            for c in convs:
+                mp = os.path.join(os.path.dirname(base), extract_deepseek.safe_filename(c) + ".md")
+                extract_deepseek.write_markdown(mp, c)
+                print(f"wrote {mp}")
+
+    print_deepseek_summary(result)
+
+    if verify:
+        corpus = extract_deepseek.load_corpus(filepath)
+        ok_all = True
+        print("=" * 60)
+        print("VERIFY (多重集比较: transcript vs 源 mapping)")
+        for c in convs:
+            v = extract_deepseek.verify_payload(c, corpus)
+            ok_all = ok_all and v.get("ok", False)
+            print(f"  {str(c.get('id'))[:8]} | {c.get('title')} | "
+                  f"{'PASS' if v.get('ok') else 'FAIL'}")
+            for k, val in (v.get("checks") or {}).items():
+                print(f"      {'OK ' if val else 'BAD'} {k}")
+            print(f"      source={v.get('source_fragment_count')} "
+                  f"output={v.get('output_fragment_count')} "
+                  f"missing={v.get('missing_count')} duplicate={v.get('duplicate_count')}")
+        print("=" * 60)
+        print("VERIFY RESULT:", "PASS" if ok_all else "FAIL")
+        if not ok_all:
+            sys.exit(3)
+    return 0
+
+
+# ============================================================
 # CLI
 # ============================================================
+
+USAGE = """Usage:
+  python session_extract.py <session.jsonl>
+  python session_extract.py --session <session-id>
+  python session_extract.py --summary <session.jsonl>
+  python session_extract.py --platform codex|claude <file>
+  python session_extract.py --platform deepseek <conversations.json> --ids <id>[,<id>] [--out <out.json> | --outdir <dir>]
+  python session_extract.py --scan <conversations.json> --kw <keyword> [--kw <keyword>...] [--top N]"""
+
 
 def main():
     args = sys.argv[1:]
 
     if not args:
-        print("Usage:")
-        print("  python session_extract.py <session.jsonl>")
-        print("  python session_extract.py --session <session-id>")
-        print("  python session_extract.py --summary <session.jsonl>")
-        print("  python session_extract.py --platform codex|claude <file>")
+        print(USAGE)
         sys.exit(1)
 
     mode = "full"
     filepath = None
     platform = None
     home = None
+
+    # --- 新增（DeepSeek 相关）---
+    scan_file = None
+    keywords = []
+    top = 25
+    ids = []
+    extract_all = False
+    out = None
+    outdir = None
+    reason = None
+    markdown = False
+    verify = False
+    as_json = False
 
     i = 0
     while i < len(args):
@@ -265,12 +494,53 @@ def main():
             mode = "summary"
             filepath = args[i + 1]
             i += 2
+        elif args[i] == "--scan" and i + 1 < len(args):
+            scan_file = args[i + 1]
+            i += 2
+        elif args[i] == "--kw" and i + 1 < len(args):
+            keywords.append(args[i + 1])
+            i += 2
+        elif args[i] == "--top" and i + 1 < len(args):
+            top = int(args[i + 1])
+            i += 2
+        elif args[i] == "--ids" and i + 1 < len(args):
+            ids.extend([x.strip() for x in args[i + 1].split(",") if x.strip()])
+            i += 2
+        elif args[i] == "--all":
+            extract_all = True
+            i += 1
+        elif args[i] == "--out" and i + 1 < len(args):
+            out = args[i + 1]
+            i += 2
+        elif args[i] == "--outdir" and i + 1 < len(args):
+            outdir = args[i + 1]
+            i += 2
+        elif args[i] == "--reason" and i + 1 < len(args):
+            reason = args[i + 1]
+            i += 2
+        elif args[i] == "--markdown":
+            markdown = True
+            i += 1
+        elif args[i] == "--verify":
+            verify = True
+            i += 1
+        elif args[i] == "--json":
+            as_json = True
+            i += 1
         else:
             filepath = args[i]
             i += 1
 
+    # --- 语料库检索模式（DeepSeek 导出包）---
+    if scan_file:
+        if not os.path.isfile(scan_file):
+            print(f"ERROR: File not found: {scan_file}")
+            sys.exit(1)
+        sys.exit(run_scan(scan_file, keywords, top, as_json))
+
     if not filepath:
         print("ERROR: No input file specified")
+        print(USAGE)
         sys.exit(1)
 
     if not os.path.isfile(filepath):
@@ -278,10 +548,19 @@ def main():
         sys.exit(1)
 
     if platform is None:
-        platform = detect_platform(filepath)
-        if platform == "unknown":
-            print("WARNING: Could not detect platform, defaulting to 'codex'")
-            platform = "codex"
+        try:
+            platform = detect_platform(filepath)
+        except ValueError as e:
+            print(f"ERROR: {e}")
+            sys.exit(1)
+
+    # --- DeepSeek 分支：打捞成独立 JSON ---
+    if platform == "deepseek":
+        sys.exit(run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason, markdown, verify))
+
+    if platform == "unknown":
+        print("WARNING: Could not detect platform, defaulting to 'codex'")
+        platform = "codex"
 
     size_mb = os.path.getsize(filepath) / (1024 * 1024)
     if size_mb > 10:
