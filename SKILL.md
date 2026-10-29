@@ -1,12 +1,14 @@
 ---
 name: session-extract
 description: |
-  Use when a user provides a session ID, session JSONL file, or a DeepSeek
-  export bundle and needs to understand and continue that work.
+  Use when a user provides a session ID, session JSONL file, a DeepSeek
+  export bundle, or a DeepSeek share link, and needs to understand and
+  continue that work.
   Also triggered by phrases like "恢复上下文", "接手工作", "之前做到哪了",
   "从聊天记录恢复", "交接", "handoff", "打捞会话", "找回聊天记录".
   Automatically detects the platform (Codex / Claude Code / DeepSeek) from the
-  session file, and can search a whole DeepSeek corpus by topic keyword.
+  session file, can search a whole DeepSeek corpus by topic keyword, and can
+  fetch attachment bytes from a DeepSeek share link.
   NOT when the current conversation already has sufficient context.
 ---
 
@@ -22,17 +24,18 @@ DeepSeek 导出包是**单文件装全部会话**，另提供「按话题检索�
 
 ## 平台差异
 
-| 维度 | Codex | Claude Code | DeepSeek |
-|------|-------|-------------|----------|
-| 文件位置 | `~/.codex/sessions/YYYY/MM/DD/` | `~/.claude/projects/<project-dir>/` | 导出包内的 `conversations.json`（**单文件装全部会话**） |
-| 会话结构 | 线性 JSONL | 线性 JSONL | **聊天树**（`mapping`，节点带 `parent`/`children`） |
-| 定位方式 | session ID | session ID | **关键词 → 全语料检索**（标题只是自动摘要，靠不住） |
-| 标题 | 原始标题 | 原始 / `custom-title` | **自动生成的摘要**，常与用户记忆的措辞不符 |
-| 核心恢复入口 | `task_complete`（Agent 自生成报告） | `file-history-snapshot`（文件变更链逆推） | fragment 正文全文检索 + 聊天树线性化 |
-| 元数据 | 第 1 行 `session_meta` | 首条 `user` 消息的 metadata | 会话对象 `{id, title, inserted_at, updated_at, mapping}` |
-| Agent 输出 | `event_msg` 中的 `agent_message` | `assistant` 类型消息 | `RESPONSE` fragment（`THINK` 是思考链） |
-| 工具调用 | `response_item` 中的 `tool_use` | `assistant.message.content` 中的 `tool_use` | `TOOL_SEARCH`/`SEARCH` fragment（`TOOL_OPEN`/`TOOL_FIND` **载荷未导出**） |
-| 快照时效 | 实时落盘 | 实时落盘 | **导出时刻的快照，可能滞后于最新会话** |
+| 维度 | Codex | Claude Code | DeepSeek（导出包） | DeepSeek（分享链接） |
+|------|-------|-------------|-------------------|----------------------|
+| 文件位置 | `~/.codex/sessions/YYYY/MM/DD/` | `~/.claude/projects/<project-dir>/` | 导出包内的 `conversations.json`（**单文件装全部会话**） | `https://chat.deepseek.com/share/<id>`（**公开链接，无需登录**） |
+| 会话结构 | 线性 JSONL | 线性 JSONL | **聊天树**（`mapping`，节点带 `parent`/`children`） | 线性消息数组 |
+| 定位方式 | session ID | session ID | **关键词 → 全语料检索**（标题只是自动摘要，靠不住） | share_id / 分享链接 |
+| 标题 | 原始标题 | 原始 / `custom-title` | **自动生成的摘要**，常与用户记忆的措辞不符 | 占位符「来自分享的对话」，真实名要 `--title` 传入 |
+| 核心恢复入口 | `task_complete`（Agent 自生成报告） | `file-history-snapshot`（文件变更链逆推） | fragment 正文全文检索 + 聊天树线性化 | 分享 API 正文 + 附件字节直下 |
+| 元数据 | 第 1 行 `session_meta` | 首条 `user` 消息的 metadata | 会话对象 `{id, title, inserted_at, updated_at, mapping}` | `{data:{biz_data:{title, model_type, messages[]}}}` |
+| Agent 输出 | `event_msg` 中的 `agent_message` | `assistant` 类型消息 | `RESPONSE` fragment（`THINK` 是思考链） | `RESPONSE` fragment + `TIP` fragment（导出包没有） |
+| 工具调用 | `response_item` 中的 `tool_use` | `assistant.message.content` 中的 `tool_use` | `TOOL_SEARCH`/`SEARCH` fragment（`TOOL_OPEN`/`TOOL_FIND` **载荷未导出**） | `TOOL_SEARCH` + `TOOL_OPEN`（**`TOOL_OPEN` 载荷完整**） |
+| 附件 | — | — | **只有元数据，字节不在包里** | **字节可直下** |
+| 快照时效 | 实时落盘 | 实时落盘 | **导出时刻的快照，可能滞后于最新会话** | 分享当时的**最终态**（中间轮次已丢失） |
 
 ## 跨平台注意
 
@@ -175,6 +178,70 @@ conversations[] # id, title, inserted_at, updated_at, rescue_reason, stats, atta
 **注意：DeepSeek 导出只存附件元数据，图片二进制不在导出包里**——有附件时会额外写一份
 `<base>_attachments.json`，明说「缺了什么、每个附件回答的是哪一问」。
 
+### DeepSeek 分享链接打捞模式
+
+> **与导出包路径互补，不是重复**：导出包捞不到附件字节，**分享链接能**。
+> 两条路径各有独占内容（见下表），**并集才是完整历史**。
+
+| 维度 | 账号导出包 | 分享链接 |
+|------|-----------|---------|
+| 输入 | `conversations.json`（需账号导出） | `/share/<id>` 公开链接，**无需登录** |
+| 会话结构 | 聊天树 `mapping` → DFS 线性化 | 线性消息数组，无需线性化 |
+| 附件 | 只有元数据（**无字节**） | **字节可直下** ← 独有 |
+| `TOOL_OPEN` 载荷 | 未导出 | **完整** ← 独有 |
+| 标题 | 真实会话名 | 占位符「来自分享的对话」，**需 `--title` 传真实名** |
+| 轮次 | 快照时刻的状态 | **只有最终态**（用户编辑/删掉的中间轮次不在其中） |
+
+```powershell
+# Windows PowerShell
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <share_id|share_url> --outdir <dir> --title "真实会话名" --reason "打捞原因" --markdown --verify
+
+# macOS/Linux
+python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <share_id|share_url> --outdir <dir> --title "真实会话名"
+```
+
+| 参数 | 说明 |
+|------|------|
+| `<share_id \| share_url>` | 位置参数。裸 share_id 或完整分享链接都行，模块内部归一化 |
+| `--title "<name>"` | **真实会话名**。分享 API 只给占位符，不传则 `title_is_placeholder=true`，与导出包路径对不上 |
+| `--outdir <dir>` | 产物目录；**附件字节落在 `<dir>/附件/`**，清单里 `local_path` 用正斜杠相对路径 |
+| `--out <path>` | 输出单个 JSON（默认 `rescued_deepseek_share.json`） |
+| `--verify` | 多重集比较自证：transcript vs 分享 API 原始响应 |
+
+**跨源并集时的三个坑**（不处理会误判成「打捞丢失」）：
+
+1. **容器键名不同** —— 导出包是 `raw_mapping`，分享链接是 `raw_messages`（它没有聊天树）。并集代码要**同时认这两个键**。
+2. **`TOOL_OPEN` 载荷差异是来源差异** —— 分享侧有 `result{url,title,snippet}`，导出侧根本没导出。不是 bug。
+3. **`[!reference:N]` 必须先归一再比正文** —— 分享侧剥离了行内引用标记（引用关系移到 `references` 数组），导出侧保留着。实测 48 个共有节点里 19 个报文本差异**全是这个原因**，归一后相似度 0.959–0.991。
+
+`transcript[].sources[]` 与 `_meta.sources[]` 已标注每个节点来自哪条路径，并集时按它标注出处。
+
+### 跨源并集模式
+
+两条路径都跑完之后，求并集——**并集才是完整历史**。
+
+```powershell
+python "[path-to-skill]/scripts/session_extract.py" --merge <导出包产物.json> --merge-with <分享链接产物.json> --outdir <dir> --markdown
+```
+
+产物仍是 `rescued-session/v1`（**不升 v2**）：并集信息放在 `_meta.merge`，来源清单放在
+`_meta.sources[]`，节点出处放在 `transcript[].sources[]`。单源产物不需要这些块，
+所以**并集产物与单源产物对下游是同构的**。
+
+**合并算法（`scripts/merge_deepseek.py`）**：
+
+| 环节 | 规则 |
+|------|------|
+| 节点对齐键 | `node_id`——两条路径的编号空间一致（实测分享链接 48 个 node_id 全是导出包的子集，导出包多出 2 轮） |
+| fragment 对齐键 | **`(node_id, type, 节点内序号)`**。⚠️ 不能只用 `node_id`——一个节点里有多个 fragment，只按 node_id 合并会把整个节点压成一条，**248 条 fragment 会塌成 50 条** |
+| 正文 | 取**导出包**版本（保留 `[!reference:N]` 行内标记与更完整 THINK 链）；分享链接的差异化文本另存 `content_share`，信息不丢而主版本不被改写 |
+| 附件 | 按**归一化 file_id** 合并——导出包是裸 UUID、分享链接带 `file-` 前缀，不归一化会把 4 个附件算成 8 个 |
+| `bytes_available` | **或**关系：任一来源拿到字节就算有 |
+| 容器兜底 | `raw_mapping`（导出包）与 `raw_messages`（分享链接）**两个都保留**，不做取舍 |
+
+**并集后自检的不变式**：按合并键比较多重集——导出包的每个 fragment 键都在、
+分享链接的每个 fragment 键都在、没有凭空多出的键。
+
 ### ③ 核对仓库状态
 
 ```bash
@@ -227,7 +294,22 @@ git branch
     ├─ 记得 → --scan --kw <关键词> 检索语料库 → 候选给用户挑
     └─ 不记得 → --scan 用泛词试探（如同步 / 上传 / 报错）→ 看 title_match 收敛
         → 定位后 --platform deepseek --ids <id> 打捞 → --verify 自证
+        → 需要附件字节 / 缺中间轮次？→ 再走 --platform deepseek-share <share_id>
+          → 跨源求并集，用 transcript[].sources[] 标注每个节点出处
+
+用户只给了一个 DeepSeek 分享链接？
+└─ YES → --platform deepseek-share <share_id|url> --title "<真实会话名>" --outdir <dir>
 ```
+
+**导出包 vs 分享链接怎么选**：
+
+| 需求 | 走哪条 |
+|------|--------|
+| 找会话（只知道话题） | 导出包 + `--scan --kw` |
+| 要**附件字节**（图片） | **分享链接**（导出包只有元数据） |
+| 要**中间轮次**（用户改过的原始提问） | **导出包**（分享链接只有最终态） |
+| 要 `TOOL_OPEN` 载荷 | **分享链接**（导出包未导出该载荷） |
+| 要最完整的历史 | **两条都跑，求并集** |
 
 ## 核心原则
 
@@ -241,6 +323,9 @@ git branch
 8. **打捞后必须自证** — 打捞完立刻跑多重集比较（`--verify`）：源 fragment 签名多重集 == 产物 transcript 多重集，且 `raw_mapping` 与源逐字相等。只比长度不算数——长度相同也可能是"丢一个重复一个"。**Why:** 静默丢数据比报错更危险，用户不会发现少了一段。
 9. **不臆造** — 目标会话不在导出里时，如实报告"不在本次导出中"，并附证据（sha256 / 命中计数 / 数据时间边界），把候选全部交给用户挑，而不是拿一个"最像的"糊弄过去。
 10. **如实报告导出格式本身的信息损失** — 缺失的载荷要指名道姓，不能含糊带过。DeepSeek 的 `TOOL_OPEN`/`TOOL_FIND` 载荷未导出、附件只有元数据没有图片本体——这些是**导出格式的固有限制**，不是 Agent 漏捞了。产出「附件清单 + 每张图对应的提问」，并明确告知用户需回客户端取图。**Why:** 用户会以为"Agent 明明看到了会话，怎么没把图给我"——含糊其辞比明说"做不到"更伤信任。
+11. **元数据 ≠ 内容，要显式区分** — 附件、版本号、文件大小这类**描述性字段**不等于内容本身。清单里用 `bytes_available` / `bytes_available_in_export` 这类布尔字段把「有描述」和「有实体」分开标，跨源比对时才不会把缺字节当成缺记录。**Why:** 一个写着 `file_size: <字节数>` 的条目很容易被当成"图片就在那儿"，而实际上那 <字节数> 字节根本不在包里。
+12. **单一来源 ≠ 完整，跨源求并集并标注出处** — 账号导出包是某时刻的快照，分享链接只有最终态，两边各有独占内容（导出包多中间轮次与 某 issue 那类线索，分享链接多附件字节与 `TOOL_OPEN` 载荷）。**并集才是完整历史**，并用 `transcript[].sources[]` / `_meta.sources[]` 标注每个节点来自哪条路径。**Why:** 任何单一来源都有它自己的盲区，不标注出处就无法判断"某段内容到底从哪来、能不能信"。
+13. **产物必须自带溯源** — 每份产物都要记下**它从哪来**：源文件路径 + sha256（或 share_id + 端点 + 响应 sha256）、抓取时间、逐项产物的来源。**Why:** 打捞产物会脱离原会话独立流传；没有溯源，三天后没人能证明它是哪一版对话、对应哪一份源数据。
 
 ## 已知坑与应对
 
@@ -254,7 +339,11 @@ git branch
 | **解压出的文件夹可能是旧快照** | DeepSeek 导出包是下载时刻的快照，而用户解压出来的文件夹可能来自更早的一次下载、且文件名日期与内容不一致 | 打捞前必须分别计算 **zip 内层文件** 与 **解压出的文件夹文件** 的 sha256 并比对，二者不一致时**以 zip 为准**；不要相信文件夹名，也不要相信单次 `md5sum` 的输出（本次即被误报为两者相同） |
 | **DeepSeek 聊天树不是列表** | `mapping` 是树，重新生成答案会 fork 出兄弟分支；朴素遍历 `mapping.values()` 会把两条矛盾分支拼在一起 | 从 `root` 深度优先线性化，并补捞 root 不可达的孤儿节点（脚本已实现） |
 | **DeepSeek `TOOL_OPEN`/`TOOL_FIND` 载荷未导出** | 这两类 fragment 只有 `type`，没有 `content`/`results` | 如实告知用户这是导出本身的信息损失，无法补救；不要假装"内容都在" |
-| **DeepSeek 附件无法打捞** | 导出包只记录附件的 `file_id` / `file_name` / `file_size`，**图片本体不在包内**，zip 里也没有附件目录（只有 `user.json` + `conversations.json` 两个文件） | Agent 应产出「附件清单 + 每张图对应的提问」并明确告知用户需回客户端取图，**不得假装已捞到**；清单里显式标注 `bytes_available_in_export: false` |
+| **DeepSeek 附件无法打捞** | 导出包只记录附件的 `file_id` / `file_name` / `file_size`，**图片本体不在包内**，zip 里也没有附件目录（只有 `user.json` + `conversations.json` 两个文件） | 导出包路径只能产出「附件清单 + 每张图对应的提问」并标注 `bytes_available_in_export: false`；**要字节就换分享链接路径**（`--platform deepseek-share`），它能直下原图 |
+| **单一来源 ≠ 完整历史** | 导出包是某时刻的快照，分享链接只有最终态（用户编辑/删掉的中间轮次不在其中）；两边各有独占内容 | 跨源求**并集**，并用 `transcript[].sources[]` / `_meta.sources[]` **标注每个节点的出处**，别假装单一来源就是全的 |
+| **跨源比对正文前必须归一** | 分享侧剥离了 `[!reference:N]` 行内引用标记（引用关系移到 `references` 数组），导出侧保留着 | 归一后再比。实测 48 个共有节点里 19 个报文本差异**全是这个原因**，归一后相似度 0.959–0.991 |
+| **资源 URL 不在 DOM 里** | 站点 API 返回了资源路径（如 `signed_path`）但页面**完全不渲染**它——DOM 里没有节点、resource timeline 里也没有请求 | 去前端 bundle 反查 URL 构造函数：在 `main.<hash>.js` 里 `grep -o -E ".{150}signedPath.{250}"`，顺藤摸瓜找到域名与路径前缀的拼接逻辑（DeepSeek 是 `files.deepseeksvc.com` + `/api` + `signed_path` + `?ty=p`），再验证 `Content-Type` 是 `image/*` 而非 `text/html`。**比在 DOM 里瞎找快一个数量级** |
+| **失效端点返回 200 + SPA HTML** | 老接口 `/api/v0/share?share_id=` 返回 **HTTP 200**，内容却是首页 HTML | 显式校验响应体：JSON 前缀不是 `{` 就直接报错，别把 HTML 当 JSON 解析 |
 
 ### 反面教材：绕路3轮才回到脚本
 

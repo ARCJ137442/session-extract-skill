@@ -294,6 +294,9 @@ def build_transcript(conv):
             "label": label,
             "model": msg.get("model"),
             "timestamp": msg.get("inserted_at"),
+            # 跨源并集用：这条 fragment 来自哪条采集路径
+            # （分享链接路径的同一字段值为 ["share"]）
+            "sources": ["export"],
         }
         if frag.get("content"):
             entry["content"] = frag["content"]
@@ -439,6 +442,24 @@ def extract(filepath, ids=None, reason=None):
             ),
         },
         "conversation_count": len(picked),
+        # 跨源并集用：本路径覆盖了哪些节点
+        "sources": [
+            {
+                "kind": "export-bundle",
+                "file": path,
+                "sha256": file_sha256(path),
+                "conversation_count": len(corpus),
+                "node_ids": sorted(
+                    {
+                        str(nid)
+                        for c in picked
+                        for nid in (c.get("mapping") or {})
+                        if nid != "root"
+                    },
+                    key=lambda x: (len(x), x),
+                ),
+            }
+        ],
     }
 
     return {

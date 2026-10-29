@@ -11,6 +11,7 @@ Unified Session Extractor — 支持 Codex、Claude Code 和 DeepSeek 三种会�
     python session_extract.py --platform codex|claude <file>
     python session_extract.py --platform deepseek <conversations.json> --ids <id>[,<id>] --out <out.json>
     python session_extract.py --platform deepseek <conversations.json> --ids <id>[,<id>] --outdir <dir>
+    python session_extract.py --platform deepseek-share <share_id|share_url> --outdir <dir>
     python session_extract.py --scan <conversations.json> --kw 某同步插件 --kw 上传
 """
 import json
@@ -26,6 +27,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from extract_codex import extract as extract_codex
 from extract_claude import extract as extract_claude
 import extract_deepseek
+import extract_deepseek_share
+import merge_deepseek
 
 
 # ============================================================
@@ -274,15 +277,24 @@ def print_scan(results, keywords, corpus_count):
 
 
 def print_deepseek_summary(result):
-    """打捞产物摘要。"""
+    """打捞产物摘要（兼容导出包与分享链接两种来源）。"""
     meta = result.get("_meta", {})
     src = meta.get("source", {})
+    kind = src.get("kind") or "export-bundle"
     print("=" * 60)
-    print("RESCUED SESSION (deepseek-web-export)")
-    print(f"  Source file:   {src.get('file')}")
+    print(f"RESCUED SESSION (deepseek-web-{kind})")
+    if src.get("file"):
+        print(f"  Source file:   {src.get('file')}")
+    if src.get("share_id"):
+        print(f"  Share id:      {src.get('share_id')}")
+        print(f"  Share url:     {src.get('share_url')}")
+        print(f"  Endpoint:      {src.get('endpoint')}")
     print(f"  Source sha256: {src.get('sha256')}")
+    in_source = src.get("conversation_count_in_source")
+    if in_source is None and src.get("message_count_in_source") is not None:
+        in_source = src.get("message_count_in_source")
     print(f"  Conversations: {meta.get('conversation_count')} / "
-          f"{src.get('conversation_count_in_source')} in source")
+          f"{in_source} in source")
     reason = meta.get("extraction", {}).get("rescue_reason")
     if reason:
         print(f"  Reason:        {reason}")
@@ -340,6 +352,80 @@ def attachment_manifest(meta, conv):
         ),
         "attachments": conv.get("attachments") or [],
     }
+
+
+def run_deepseek_share_extract(share, title, out, outdir, reason, markdown, verify):
+    """
+    DeepSeek 分享链接打捞：公开分享页，不需要账号导出包。
+
+    与导出包路径互补——导出包捞不到附件字节，分享链接能。
+    附件落在 <outdir>/附件/ 下，attachments[].local_path 用正斜杠相对路径。
+    """
+    try:
+        result = extract_deepseek_share.extract(
+            share, title=title, reason=reason, outdir=outdir
+        )
+    except Exception as e:
+        print(f"ERROR: 分享链接提取失败: {type(e).__name__}: {e}")
+        sys.exit(2)
+
+    meta = result.get("_meta", {})
+    convs = result.get("conversations", [])
+
+    if outdir:
+        outdir = os.path.abspath(outdir)
+        os.makedirs(outdir, exist_ok=True)
+        for c in convs:
+            base = extract_deepseek.safe_filename(c)
+            jp = os.path.join(outdir, base + ".json")
+            _write_json(jp, {"_meta": meta, "conversations": [c]})
+            print(f"wrote {jp}")
+            if c.get("attachments"):
+                ap_ = os.path.join(outdir, base + "_attachments.json")
+                _write_json(ap_, attachment_manifest(meta, c))
+                print(f"wrote {ap_}")
+            if markdown:
+                mp = os.path.join(outdir, base + ".md")
+                extract_deepseek.write_markdown(mp, c)
+                print(f"wrote {mp}")
+    else:
+        out_path = os.path.abspath(out or "rescued_deepseek_share.json")
+        out_dir = os.path.dirname(out_path)
+        if out_dir and not os.path.isdir(out_dir):
+            os.makedirs(out_dir, exist_ok=True)
+        _write_json(out_path, result)
+        print(f"wrote {out_path}")
+
+    print_deepseek_summary(result)
+
+    if verify:
+        # 模块的 extract() 不回传原始响应，校验时重新取一次分享 API 原始文档
+        try:
+            _raw, doc = extract_deepseek_share.fetch_share(
+                extract_deepseek_share.normalise_share_id(share)
+            )
+        except Exception as e:
+            print(f"WARNING: 重新取分享 API 原文失败，跳过校验: {type(e).__name__}: {e}")
+            doc = None
+        ok_all = True
+        print("=" * 60)
+        print("VERIFY (多重集比较: transcript vs 分享 API 原始响应)")
+        for c in convs:
+            if doc is None:
+                break
+            v = extract_deepseek_share.verify_payload(c, doc)
+            ok_all = ok_all and v.get("ok", False)
+            print(f"  {str(c.get('id'))[:8]} | {c.get('title')} | "
+                  f"{'PASS' if v.get('ok') else 'FAIL'}")
+            for k, val in (v.get("checks") or {}).items():
+                print(f"      {'OK ' if val else 'BAD'} {k}")
+            print(f"      source={v.get('source_fragment_count')} "
+                  f"output={v.get('output_fragment_count')} "
+                  f"missing={v.get('missing_count')} duplicate={v.get('duplicate_count')}")
+        print("=" * 60)
+        print("VERIFY RESULT: " + ("PASS" if ok_all else "FAIL"))
+        if doc is not None and not ok_all:
+            sys.exit(3)
 
 
 def run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason, markdown, verify):
@@ -466,6 +552,9 @@ def main():
     out = None
     outdir = None
     reason = None
+    title = None
+    merge_export = None
+    merge_share = None
     markdown = False
     verify = False
     as_json = False
@@ -518,6 +607,15 @@ def main():
         elif args[i] == "--reason" and i + 1 < len(args):
             reason = args[i + 1]
             i += 2
+        elif args[i] == "--title" and i + 1 < len(args):
+            title = args[i + 1]
+            i += 2
+        elif args[i] == "--merge" and i + 1 < len(args):
+            merge_export = args[i + 1]
+            i += 2
+        elif args[i] == "--merge-with" and i + 1 < len(args):
+            merge_share = args[i + 1]
+            i += 2
         elif args[i] == "--markdown":
             markdown = True
             i += 1
@@ -538,10 +636,36 @@ def main():
             sys.exit(1)
         sys.exit(run_scan(scan_file, keywords, top, as_json))
 
+    # --- 跨源并集：导出包 × 分享链接 ---
+    # 必须在 "No input file specified" 检查之前——并集模式不需要位置参数。
+    if merge_export or merge_share:
+        if not (merge_export and merge_share):
+            print("ERROR: --merge <导出包产物.json> 需要同时给 --merge-with <分享链接产物.json>")
+            sys.exit(1)
+        for p in (merge_export, merge_share):
+            if not os.path.isfile(p):
+                print(f"ERROR: File not found: {p}")
+                sys.exit(1)
+        argv = ["--export", merge_export, "--share", merge_share]
+        if out:
+            argv += ["--out", out]
+        if outdir:
+            argv += ["--outdir", outdir]
+        if markdown:
+            argv += ["--markdown"]
+        sys.exit(merge_deepseek.main(argv))
+
     if not filepath:
         print("ERROR: No input file specified")
         print(USAGE)
         sys.exit(1)
+
+    # --- DeepSeek 分享链接分支：参数是 share_id / URL，不是文件路径 ---
+    # 必须排在 os.path.isfile() 检查之前。
+    if platform == "deepseek-share":
+        sys.exit(run_deepseek_share_extract(
+            filepath, title, out, outdir, reason, markdown, verify
+        ))
 
     if not os.path.isfile(filepath):
         print(f"ERROR: File not found: {filepath}")

@@ -59,22 +59,56 @@ python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conver
 `raw_mapping` 原样保留原始结构作为兜底，`attachments` 是附件元数据清单
 （**图片二进制不在导出包里**，需要回客户端重新抓）。
 
+## DeepSeek 分享链接（公开链接，无需登录）
+
+与导出包路径**互补**，不是重复：导出包捞不到的**附件字节**，分享链接能下；
+分享链接缺的**中间轮次**，导出包有。**并集才是完整历史。**
+
+```powershell
+# share_id 裸串或完整分享链接都行；附件落在 <dir>/附件/
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <share_id|share_url> --outdir <dir> --title "真实会话名" --markdown --verify
+```
+
+```bash
+# macOS/Linux
+python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <share_id|share_url> --outdir <dir> --title "真实会话名"
+```
+
+分享 API 只给占位符标题「来自分享的对话」，**真实会话名要用 `--title` 传入**，
+否则产物里 `title_is_placeholder=true`，跟导出包路径对不上。
+
+端点与抓取细节见 [`docs/deepseek-share.md`](docs/deepseek-share.md)。
+
+## 跨源并集
+
+两条路径都跑完后求并集——**并集才是完整历史**：
+
+```powershell
+python "[path-to-skill]/scripts/session_extract.py" --merge <导出包产物.json> --merge-with <分享链接产物.json> --outdir <dir> --markdown
+```
+
+产物仍是 `rescued-session/v1`（**不升 v2**），并集信息在 `_meta.merge`，
+节点出处标在 `transcript[].sources[]` / `_meta.sources[]`。
+
 ## 平台支持
 
 | 平台 | 文件位置 | 核心恢复方式 |
 |------|----------|-------------|
 | Codex | `~/.codex/sessions/` | `task_complete` 事件 |
 | Claude Code | `~/.claude/projects/` | 文件变更链逆推 |
-| DeepSeek | 导出包内 `conversations.json` | 全语料关键词检索 + 聊天树线性化 |
+| DeepSeek（导出包） | 导出包内 `conversations.json` | 全语料关键词检索 + 聊天树线性化 |
+| DeepSeek（分享链接） | `chat.deepseek.com/share/<id>` | 分享 API 正文 + 附件字节直下 |
 
 ## 脚本
 
 | 脚本 | 作用 |
 |------|------|
-| `scripts/session_extract.py` | 调度器：定位 + 平台探测 + 分发；DeepSeek 的 `--scan` / `--platform deepseek` 入口 |
+| `scripts/session_extract.py` | 调度器：定位 + 平台探测 + 分发；DeepSeek 的 `--scan` / `--platform deepseek` / `--platform deepseek-share` 入口 |
 | `scripts/extract_codex.py` | Codex 提取器，`extract(filepath) -> dict` |
 | `scripts/extract_claude.py` | Claude Code 提取器，`extract(filepath) -> dict` |
-| `scripts/extract_deepseek.py` | DeepSeek 提取器：schema 解析、树线性化、语料检索、附件清单、`extract(filepath, ids, reason) -> dict`、多重集校验 |
+| `scripts/extract_deepseek.py` | DeepSeek 导出包提取器：schema 解析、树线性化、语料检索、附件清单、`extract(filepath, ids, reason) -> dict`、多重集校验 |
+| `scripts/extract_deepseek_share.py` | DeepSeek 分享链接提取器：分享 API 正文、附件字节下载、`extract(share, title, reason, outdir) -> dict`、多重集校验 |
+| `scripts/merge_deepseek.py` | 跨源并集：导出包 × 分享链接按 `(node_id, type, 节点内序号)` 求并集，保留两侧原始容器 |
 
 ## 注意事项
 
