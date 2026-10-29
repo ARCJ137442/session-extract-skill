@@ -12,7 +12,7 @@ DeepSeek 网页版 / APP 的「导出数据」是**单个** conversations.json�
 重新生成答案会 fork 出一条新分支。所以必须做「树 → 线性」线性化，否则会把兄弟分支
 拼在一起，得到自相矛盾的对话。
 
-Schema（已在 285 条真实样本上逐一验证）:
+Schema（在两份真实导出上逐一验证：2026-10-23 快照 285 条 / 2026-10-29 快照 332 条）:
     顶层:      list[ {id, title, inserted_at, updated_at, mapping} ]
     mapping:   { node_id: {id, parent, children[], message} }
     message:   {model, inserted_at, fragments[]}      （message 可能为 null）
