@@ -16,11 +16,20 @@ description: |
 
 ## 概述
 
-**核心能力**：从 Codex、Claude Code 的会话 JSONL 文件或 DeepSeek 导出包中提取上下文，
-自动检测平台，生成结构化的交接报告。
+**核心能力**：从 Codex、Claude Code 的会话 JSONL 文件、DeepSeek 导出包或
+**DeepSeek 分享链接**中提取上下文，自动检测平台，生成结构化的交接报告。
 
-一个脚本覆盖三个平台，通过 session ID 自动定位文件并检测格式；
+一个脚本覆盖多个平台，通过 session ID 自动定位文件并检测格式；
 DeepSeek 导出包是**单文件装全部会话**，另提供「按话题检索整个语料库」的能力。
+
+**只有一个分享链接时也能读**——不需要账号导出、不需要浏览器、不需要 Cookie：
+
+```powershell
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --print
+```
+
+这条命令把对话全文打到 stdout、不落盘，适合后续 Agent 直接读取上下文
+（详见「只读模式」一节）。
 
 ## 平台差异
 
@@ -216,6 +225,49 @@ python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <
 
 `transcript[].sources[]` 与 `_meta.sources[]` 已标注每个节点来自哪条路径，并集时按它标注出处。
 
+### 只读模式：只有一个分享链接，直接把记录读出来
+
+> **场景**：手里**只有一个分享链接**，要读里面的聊天记录，但**不需要把上下文落盘**
+> ——后续 Agent 只是想读一段对话、或要把内容直接接进当前上下文。
+>
+> **不要自己写脚本，也不要开浏览器。** 本 skill 的脚本已经够用：
+> 分享 API 直连，无需登录、无需 Cookie、不经过浏览器。
+
+```powershell
+# Windows PowerShell
+# 可读全文打到 stdout（不落盘）
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --print --title "真实会话名"
+
+# macOS/Linux
+python3 "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --print --title "真实会话名"
+```
+
+| `--format` | stdout 内容 | 落盘 |
+|---|---|---|
+| `text`（`--print` 等价） | 可读全文：提问 / 搜索结果 / 回复（跳过 THINK 链） | 否 |
+| `json` | `rescued-session/v1` 产物（含 `_meta.source` 溯源：端点 + share_id + 响应 sha256） | 否 |
+| `raw` | 分享 API 原始 JSON（想自己再加工时用） | 否 |
+
+```powershell
+# 机器可读产物 JSON（仍不落盘）
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --format json
+
+# 原始 API JSON
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --format raw
+```
+
+| 要点 | 说明 |
+|------|------|
+| **只读不下载附件字节** | 省流量。附件清单**仍如实报出数量与文件名**（`bytes_available: false`），不会写成"0 个附件" |
+| **`--format` 与 `--outdir` 互斥** | 要落盘用 `--outdir`，要读出来用 `--format`/`--print` |
+| **标题仍是占位符** | 分享 API 的 `title` 恒为「来自分享的对话」，真实会话名要 `--title` 传；不传只是 `title_is_placeholder=true`，不影响读内容 |
+| **不需要账号导出** | 只要一个链接即可，不用走「导出数据」 |
+
+> **什么时候该用哪个**：
+> - 只拿到一个链接、只是要读 → **`--print`**（本节）
+> - 要拿**图片字节** → `--outdir`（附件落在 `<dir>/附件/`）
+> - 要和导出包路径**求并集** → 两条路径各跑一次，再 `--merge` / `--merge-with`
+
 ### 跨源并集模式
 
 两条路径都跑完之后，求并集——**并集才是完整历史**。
@@ -258,6 +310,24 @@ python "[path-to-skill]/scripts/session_extract.py" --merge <导出包产物.jso
 **并集后自检的不变式**：按合并键比较多重集——导出包的每个 fragment 键都在、
 分享链接的每个 fragment 键都在、没有凭空多出的键。**外加**：
 比对两侧 `results` 的 snippet 条数与字符总数，差必须为 0。
+
+**这些不变式已固化成可执行的门禁脚本**（不用手写检查）：
+
+```powershell
+python "[path-to-skill]/scripts/verify_merged_deepseek.py" --export <导出包产物.json> --share <分享链接原始.json> --merged <并集产物.json> [--outdir <目录>]
+```
+
+| 断言 | 含义 |
+|------|------|
+| `A1_snippet_chars_not_lost` | 并集 snippet 字符总数 ≥ max(两单源) —— **本次那个 bug 只有这条能发现** |
+| `A2_snippet_entries_not_lost` | 并集带 snippet 的结果条目数 ≥ max(两单源) |
+| `A3_fragment_count_not_lost` | 并集 fragment 数 ≥ max(两单源) |
+| `A4_node_union` | 并集节点集合 == 两单源节点集合的并集 |
+| `A5_per_url_snippet_preserved` | 逐条核对：两单源里每条带 snippet 的 url，在并集里仍带 snippet 且未被截短 |
+| `A6_fragment_keys_covered` | 两单源的每个 `(node_id, type, 节点内序号)` 键都在并集里 |
+
+退出码 **0 = 全过 / 3 = 有断言失败**，可直接当门禁用。
+同时产出 `并集vs单源-差异报告.md`（逐节点差异）与 `并集自检.json`（机器可读）。
 
 ### ③ 核对仓库状态
 

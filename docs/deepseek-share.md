@@ -122,6 +122,34 @@
 
 ## 六、用法
 
+### 6.1 只读模式：只有一个链接，直接把记录读出来
+
+**不需要浏览器、不需要账号导出、不需要 Cookie、不落盘。**
+给后续「不想把上下文落盘」的 Agent 用——一条命令，输出进 stdout 即可。
+
+```bash
+# 可读全文（提问 / 搜索结果 / 回复，跳过 THINK 链）
+python scripts/extract_deepseek_share.py <share_id | share_url> --print --title "<真实会话名>"
+
+# 机器可读：rescued-session/v1 产物 JSON（含 _meta.source 溯源）
+python scripts/extract_deepseek_share.py <share_id | share_url> --format json
+
+# 分享 API 原始 JSON
+python scripts/extract_deepseek_share.py <share_id | share_url> --format raw
+```
+
+| `--format` | stdout 内容 | 落盘 |
+|---|---|---|
+| `text`（`--print` 等价） | 可读全文 | 否 |
+| `json` | `rescued-session/v1` 产物 | 否 |
+| `raw` | API 原始 JSON | 否 |
+
+- **只读模式不下载附件字节**（省流量），但附件清单**仍如实报出数量与文件名**
+  （`bytes_available: false`），不会写成「0 个附件」。
+- `--format` / `--print` 与 `--outdir` **互斥**：要落盘用 `--outdir`，要读出来用 `--format`。
+
+### 6.2 落盘模式（含附件字节）
+
 ```bash
 # 独立用（模块自带 CLI）
 python scripts/extract_deepseek_share.py <share_id | share_url> \
@@ -136,6 +164,17 @@ python scripts/session_extract.py --platform deepseek-share <share_id | share_ur
   真实会话名要打开网页看侧边栏确认后再传进来；
   传了之后 `title_is_placeholder` 会是 `false`。
 - `--verify`：多重集自证（没丢没重 + raw 一致 + 附件字节到位）。
+
+### 6.3 跨源并集后的门禁自检
+
+```bash
+python scripts/verify_merged_deepseek.py --export <导出包产物.json> \
+    --share <分享链接原始.json> --merged <并集产物.json> [--outdir <目录>]
+```
+
+6 条断言（snippet 字符/条目不丢、fragment/节点不丢、逐 url snippet 未被截短、
+fragment 键全覆盖），退出码 0 = 全过、3 = 有失败，可直接当门禁用。
+详见 SKILL.md「跨源并集模式」。
 
 ## 七、附件字段约定（与导出包路径对齐）
 

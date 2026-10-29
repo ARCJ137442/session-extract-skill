@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 import urllib.request
 from collections import Counter
 
@@ -221,7 +222,7 @@ def _safe(name):
     return (re.sub(r'[\\/:*?"<>|]+', "_", name or "").strip() or "unnamed")
 
 
-def download_attachments(biz, outdir, want_thumbnail=True):
+def download_attachments(biz, outdir, want_thumbnail=True, download=True):
     """
     下载附件**二进制**并返回清单。
 
@@ -231,6 +232,9 @@ def download_attachments(biz, outdir, want_thumbnail=True):
     端点形如：
         https://files.deepseeksvc.com/api<signed_path>&ty=p   原图
         https://files.deepseeksvc.com/api<signed_path>&ty=t   缩略图
+
+    download=False 时**只收集元数据不下载**（只读模式用：清单仍要如实
+    报出附件数量，不能因为没下载就写成 0 个）。
     """
     items = []
     att_dir = os.path.join(outdir, "附件") if outdir else None
@@ -262,9 +266,10 @@ def download_attachments(biz, outdir, want_thumbnail=True):
                 #   bytes_available:             本路径已下载到字节
                 "bytes_available_in_export": False,
             }
-            if not signed:
+            if not signed or not download:
                 base.update(bytes_available=False, local_path=None,
-                            error="no signed_path in share payload")
+                            error=("no signed_path in share payload" if not signed
+                                   else "未下载（只读模式）"))
                 items.append(base)
                 continue
 
@@ -521,10 +526,12 @@ def verify_payload(payload, doc):
 # Markdown 预览
 # ============================================================
 
-def write_markdown(path, payload, attachment_prefix="附件"):
+def render_markdown(payload, attachment_prefix="附件"):
     """
-    人类可读的 .md 预览：跳过 THINK，搜索结果渲染成链接列表，
-    附件渲染成本地图片引用（能显示才算真的捞到了）。
+    人类可读的 Markdown 文本（不落盘）。
+
+    跳过 THINK，搜索结果渲染成链接列表，附件渲染成本地图片引用
+    （能显示才算真的捞到了）。
     """
     lines = ["# {}".format(payload.get("title")), ""]
     stats = payload.get("stats", {})
@@ -571,8 +578,13 @@ def write_markdown(path, payload, attachment_prefix="附件"):
             )
         lines.append("\n## [{}] {} `{}`\n".format(e.get("seq"), e.get("label"), e.get("type")))
         lines.append(str(body))
+    return "\n".join(lines)
+
+
+def write_markdown(path, payload, attachment_prefix="附件"):
+    """把 render_markdown 的结果写到文件。"""
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+        f.write(render_markdown(payload, attachment_prefix))
 
 
 def safe_filename(payload):
@@ -593,13 +605,49 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         description="从 DeepSeek 网页版分享链接提取完整会话（含附件二进制）")
     ap.add_argument("share", help="share_id 或完整分享链接")
-    ap.add_argument("--outdir", required=True, help="输出目录（附件落在 <outdir>/附件/）")
+    ap.add_argument("--outdir", default=None,
+                    help="输出目录（附件落在 <outdir>/附件/）；不与 --format 同用")
+    ap.add_argument("--format", choices=("text", "json", "raw"), default=None,
+                    help="只读到 stdout，不落盘：text=可读全文，json=rescued-session/v1 产物，raw=API 原始 JSON")
+    ap.add_argument("--print", dest="do_print", action="store_true",
+                    help="等价于 --format text（可读全文打到 stdout，不落盘）")
     ap.add_argument("--title", default=None, help="真实会话名（分享 API 只给占位符）")
     ap.add_argument("--reason", default=None, help="打捞理由")
-    ap.add_argument("--markdown", action="store_true", help="同时写 .md 预览")
+    ap.add_argument("--markdown", action="store_true", help="同时写 .md 预览（需 --outdir）")
     ap.add_argument("--no-thumbnail", action="store_true", help="不下载缩略图")
     ap.add_argument("--verify", action="store_true", help="多重集自证")
     a = ap.parse_args(argv)
+
+    fmt = a.format or ("text" if a.do_print else None)
+    if not a.outdir and not fmt:
+        ap.error("需要 --outdir（落盘）或 --format/--print（只读到 stdout）")
+    if a.outdir and fmt:
+        ap.error("--outdir 与 --format/--print 不能同时用")
+
+    # ---- 只读模式：读到 stdout，不落盘，也不下载附件 ----
+    if fmt:
+        share_id = normalise_share_id(a.share)
+        raw_text, doc = fetch_share(share_id)
+        if fmt == "raw":
+            sys.stdout.write(raw_text)
+            return 0
+        biz = doc["data"]["biz_data"]
+        payload = build_payload(
+            biz, biz.get("messages") or [],
+            download_attachments(biz, None, download=False),
+            reason=a.reason, title=a.title, share_id=share_id)
+        if fmt == "json":
+            sys.stdout.write(json.dumps(
+                {"_meta": {"schema": SCHEMA, "platform": PLATFORM,
+                           "source": {"kind": "share-link", "share_id": share_id,
+                                      "share_url": SHARE_PAGE + share_id,
+                                      "endpoint": "GET " + SHARE_API + share_id,
+                                      "sha256": text_sha256(raw_text)}},
+                 "conversations": [payload]},
+                ensure_ascii=False, indent=2))
+        else:
+            sys.stdout.write(render_markdown(payload))
+        return 0
 
     outdir = os.path.abspath(os.path.expanduser(a.outdir))
     os.makedirs(outdir, exist_ok=True)
