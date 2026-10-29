@@ -84,6 +84,77 @@ def _ordinal_keys(entries):
     return keyed
 
 
+def _merge_results(cur, other):
+    """
+    结果列表**逐条按 url 求并集**，而不是整列取一侧。
+
+    为什么不能整列替换：导出包的 TOOL_SEARCH 结果只有 `{title, url}` 两个字段——
+    **非空但信息贫瘠**。而「只在该字段为空时才补齐」的规则对非空字段不生效，
+    于是分享链接侧的 snippet / site_name / site_icon / published_at /
+    cite_index / query_indexes 会被整体丢弃。
+
+    实测：分享链接侧 494 条结果带 snippet 共 119,948 字符，整列取导出包版本后
+    只剩 40 条 / 10,440 字符（那 40 条还是从 TOOL_OPEN 侧补进来的），
+    **109,508 字符的一手证据归零**——丢掉的正包括 某 issue 那条关键线索的发布说明原文。
+
+    逐条按 url 合并，才能既保留导出包独有的结果（节点 47/48 那轮多出的那些），
+    又补上分享链接侧的富字段。
+    """
+    cur = list(cur or [])
+    other = list(other or [])
+    if not other:
+        return cur
+    if not cur:
+        return [dict(r) for r in other]
+
+    by_url, order = {}, []
+    for r in cur:
+        u = r.get("url")
+        if u not in by_url:
+            by_url[u] = dict(r)
+            order.append(u)
+    for r in other:
+        u = r.get("url")
+        if u not in by_url:
+            by_url[u] = dict(r)
+            order.append(u)
+        else:
+            base = by_url[u]
+            for k, v in r.items():
+                if base.get(k) in (None, "", [], {}) and v not in (None, "", [], {}):
+                    base[k] = v
+    return [by_url[u] for u in order]
+
+
+def _merge_files(cur, other):
+    """附件/文件列表逐条按 file_id 求并集（file_id 形态两条路径可能不同）。"""
+    def key(f):
+        fid = str(f.get("file_id") or f.get("name") or "")
+        return fid[5:] if fid.startswith("file-") else fid
+
+    cur = list(cur or [])
+    other = list(other or [])
+    if not other:
+        return cur
+    by_key, order = {}, []
+    for f in cur:
+        k = key(f)
+        if k not in by_key:
+            by_key[k] = dict(f)
+            order.append(k)
+    for f in other:
+        k = key(f)
+        if k not in by_key:
+            by_key[k] = dict(f)
+            order.append(k)
+        else:
+            base = by_key[k]
+            for kk, vv in f.items():
+                if base.get(kk) in (None, "", [], {}) and vv not in (None, "", [], {}):
+                    base[kk] = vv
+    return [by_key[k] for k in order]
+
+
 def merge_fragments(export_entries, share_entries):
     """按 (node_id, type, 节点内序号) 求并集。"""
     exp_groups = _group_by_node(export_entries)
@@ -117,6 +188,15 @@ def merge_fragments(export_entries, share_entries):
             if other is not None:
                 for field, val in other.items():
                     if field in ("sources", "seq"):
+                        continue
+                    # **列表型字段必须逐条合并**，不能整列取一侧——
+                    # 导出包的 results 非空但贫瘠（只有 title/url），
+                    # 整列替换会把分享链接侧的 snippet 等富字段整体丢掉。
+                    if field == "results":
+                        cur["results"] = _merge_results(cur.get("results"), val)
+                        continue
+                    if field == "files":
+                        cur["files"] = _merge_files(cur.get("files"), val)
                         continue
                     if cur.get(field) in (None, "", [], {}) and val not in (None, "", [], {}):
                         cur[field] = val
@@ -287,7 +367,10 @@ def merge(export_doc, share_doc):
             "only_in_share": only_share,
             "content_rule": (
                 "同一 node_id 冲突时取导出包版本（保留行内引用标记与更完整 THINK 链），"
-                "导出包缺失的字段由分享链接版本补齐；分享链接独有的 fragment（如 TIP）追加"
+                "导出包缺失的字段由分享链接版本补齐；分享链接独有的 fragment（如 TIP）追加。"
+                "列表型字段（results/files）逐条按主键（url/file_id）合并，"
+                "不整列取一侧——导出包的 results 非空但贫瘠（只有 title/url），"
+                "整列替换会丢掉分享链接侧的 snippet/site_name/published_at"
             ),
             "note": (
                 "单一来源 ≠ 完整历史：导出包是快照（含中间轮次）、分享链接是最终态"
@@ -332,7 +415,11 @@ def write_markdown(path, payload):
             )
         if e.get("type") in ("TOOL_SEARCH", "SEARCH"):
             body = "\n".join(
-                "- [%s](%s)" % (r.get("title"), r.get("url")) for r in (e.get("results") or [])
+                "- [%s](%s)%s" % (
+                    r.get("title"), r.get("url"),
+                    ("\n  > " + str(r.get("snippet")).replace("\n", " ")) if r.get("snippet") else "",
+                )
+                for r in (e.get("results") or [])
             )
         src = "+".join(e.get("sources") or [])
         lines.append("\n## [%s] %s `%s`  ⟨%s⟩\n" % (
