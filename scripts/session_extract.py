@@ -334,6 +334,25 @@ def _write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
+def _write_openai_variant(meta, convs, path, title=None):
+    """
+    额外写一份「ChatGPT / OpenAI 可直接用」的产物。
+
+    这是「不需要写长脚本」的落地方式：打捞完直接得到一个能上传到
+    ChatGPT 网页版、或直接喂给任意 OpenAI 兼容端点的 messages 结构，
+    不必再自己写一遍转换器（折叠 fragment、映射引用、归一 URL 锚点）。
+    """
+    try:
+        import to_openai
+    except ImportError:
+        print("WARNING: 找不到 to_openai.py，跳过 openai 形态产物")
+        return None
+    doc = to_openai.convert({"_meta": meta, "conversations": convs}, title=title)
+    _write_json(path, doc)
+    print(f"wrote {path}")
+    return path
+
+
 def attachment_manifest(meta, conv):
     """
     附件清单。
@@ -354,7 +373,8 @@ def attachment_manifest(meta, conv):
     }
 
 
-def run_deepseek_share_extract(share, title, out, outdir, reason, markdown, verify):
+def run_deepseek_share_extract(share, title, out, outdir, reason, markdown, verify,
+                               as_shape="rescued"):
     """
     DeepSeek 分享链接打捞：公开分享页，不需要账号导出包。
 
@@ -380,6 +400,10 @@ def run_deepseek_share_extract(share, title, out, outdir, reason, markdown, veri
             jp = os.path.join(outdir, base + ".json")
             _write_json(jp, {"_meta": meta, "conversations": [c]})
             print(f"wrote {jp}")
+            if as_shape == "openai":
+                _write_openai_variant(meta, [c],
+                                      os.path.join(outdir, base + ".openai.json"),
+                                      title=title)
             if c.get("attachments"):
                 ap_ = os.path.join(outdir, base + "_attachments.json")
                 _write_json(ap_, attachment_manifest(meta, c))
@@ -395,6 +419,11 @@ def run_deepseek_share_extract(share, title, out, outdir, reason, markdown, veri
             os.makedirs(out_dir, exist_ok=True)
         _write_json(out_path, result)
         print(f"wrote {out_path}")
+        if as_shape == "openai":
+            _write_openai_variant(
+                meta, convs,
+                os.path.splitext(out_path)[0] + ".openai.json",
+                title=title)
 
     print_deepseek_summary(result)
 
@@ -405,7 +434,7 @@ def run_deepseek_share_extract(share, title, out, outdir, reason, markdown, veri
                 extract_deepseek_share.normalise_share_id(share)
             )
         except Exception as e:
-            print(f"WARNING: 重新取分享 API 原文失败，跳过校验: {type(e).__name__}: {e}")
+            print(f"WARNING: 重新取分享 API 原文失败，校验未执行: {type(e).__name__}: {e}")
             doc = None
         ok_all = True
         print("=" * 60)
@@ -423,12 +452,18 @@ def run_deepseek_share_extract(share, title, out, outdir, reason, markdown, veri
                   f"output={v.get('output_fragment_count')} "
                   f"missing={v.get('missing_count')} duplicate={v.get('duplicate_count')}")
         print("=" * 60)
-        print("VERIFY RESULT: " + ("PASS" if ok_all else "FAIL"))
-        if doc is not None and not ok_all:
+        if doc is None:
+            # ⚠️ 校验没跑成，**不能报 PASS**——「没验」和「验过了」是两回事，
+            # 报个假的 PASS 会让下游以为产物已被自证。
+            print("VERIFY RESULT: SKIPPED (未能取回原始响应，本次未校验)")
+            sys.exit(4)
+        print("VERIFY RESULT:", "PASS" if ok_all else "FAIL")
+        if not ok_all:
             sys.exit(3)
 
 
-def run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason, markdown, verify):
+def run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason, markdown, verify,
+                         as_shape="rescued"):
     """DeepSeek 打捞：抽出指定会话，写成独立 JSON（必要时附 .md 预览和附件清单）。"""
     if not ids and not extract_all:
         print("ERROR: --platform deepseek 需要 --ids <id>[,<id>...] 或 --all")
@@ -453,6 +488,9 @@ def run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason, markdo
             jp = os.path.join(outdir, base + ".json")
             _write_json(jp, {"_meta": meta, "conversations": [c]})
             print(f"wrote {jp}")
+            if as_shape == "openai":
+                _write_openai_variant(meta, [c],
+                                      os.path.join(outdir, base + ".openai.json"))
             if c.get("attachments"):
                 ap_ = os.path.join(outdir, base + "_attachments.json")
                 _write_json(ap_, attachment_manifest(meta, c))
@@ -468,6 +506,9 @@ def run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason, markdo
             os.makedirs(out_dir, exist_ok=True)
         _write_json(out_path, result)
         print(f"wrote {out_path}")
+        if as_shape == "openai":
+            _write_openai_variant(meta, convs,
+                                  os.path.splitext(out_path)[0] + ".openai.json")
 
         with_attachments = [c for c in convs if c.get("attachments")]
         if with_attachments:
@@ -528,7 +569,19 @@ USAGE = """Usage:
   python session_extract.py --summary <session.jsonl>
   python session_extract.py --platform codex|claude <file>
   python session_extract.py --platform deepseek <conversations.json> --ids <id>[,<id>] [--out <out.json> | --outdir <dir>]
-  python session_extract.py --scan <conversations.json> --kw <keyword> [--kw <keyword>...] [--top N]"""
+  python session_extract.py --platform deepseek-share <share_id|share_url> [--out <out.json> | --outdir <dir>]
+  python session_extract.py --merge <export-product.json> --merge-with <share-product.json> [--outdir <dir>]
+  python session_extract.py --scan <conversations.json> --kw <keyword> [--kw <keyword>...] [--top N]
+
+Output shape:
+  --as rescued   rescued-session/v1（默认，忠实产物）
+  --as openai    ChatGPT / OpenAI 可直接用的 messages 结构（少写一段转换脚本）
+
+Common flags:
+  --title "..."   真实会话名（分享链接侧的标题是占位符，必须人工指定）
+  --reason "..."  打捞理由，写进产物的 rescue_reason
+  --markdown      额外写 .md 预览
+  --verify        多重集自证（没丢没重）"""
 
 
 def main():
@@ -558,6 +611,7 @@ def main():
     markdown = False
     verify = False
     as_json = False
+    as_shape = "rescued"
 
     i = 0
     while i < len(args):
@@ -625,6 +679,15 @@ def main():
         elif args[i] == "--json":
             as_json = True
             i += 1
+        elif args[i] == "--as" and i + 1 < len(args):
+            as_shape = args[i + 1].lower()
+            i += 2
+            if as_shape not in ("rescued", "openai"):
+                print("ERROR: --as 只能是 rescued 或 openai")
+                sys.exit(1)
+        elif args[i] in ("--help", "-h"):
+            print(USAGE)
+            sys.exit(0)
         else:
             filepath = args[i]
             i += 1
@@ -664,7 +727,8 @@ def main():
     # 必须排在 os.path.isfile() 检查之前。
     if platform == "deepseek-share":
         sys.exit(run_deepseek_share_extract(
-            filepath, title, out, outdir, reason, markdown, verify
+            filepath, title, out, outdir, reason, markdown, verify,
+            as_shape=as_shape
         ))
 
     if not os.path.isfile(filepath):
@@ -680,7 +744,8 @@ def main():
 
     # --- DeepSeek 分支：打捞成独立 JSON ---
     if platform == "deepseek":
-        sys.exit(run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason, markdown, verify))
+        sys.exit(run_deepseek_extract(filepath, ids, extract_all, out, outdir, reason,
+                                      markdown, verify, as_shape=as_shape))
 
     if platform == "unknown":
         print("WARNING: Could not detect platform, defaulting to 'codex'")
