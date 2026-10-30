@@ -40,19 +40,19 @@ DeepSeek 的「导出数据」是一个 `conversations.json`，里面是该账�
 
 ```powershell
 # 按关键词检索整个语料库（--kw 可重复）
-python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --kw 上传 --kw 同步
+python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某专有词 --kw 上传 --kw 同步
 
 # 定位后打捞成独立 JSON，并跑多重集比较自证
-python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id>,<会话 id> --out <out.json> --reason "打捞原因" --markdown --verify
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <id1>,<id2> --out <out.json> --reason "打捞原因" --markdown --verify
 
 # 一个会话一份文件（+ .md 预览 + 附件清单）
-python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id> --outdir <dir> --markdown
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <id> --outdir <dir> --markdown
 ```
 
 ```bash
 # macOS/Linux
-python3 "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --kw 上传 --kw 同步
-python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id> --out <out.json> --verify
+python3 "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某专有词 --kw 上传 --kw 同步
+python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <id> --out <out.json> --verify
 ```
 
 产物 schema `rescued-session/v1`：`transcript` 是聊天树线性化后的可读视图，
@@ -92,6 +92,9 @@ python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> 
 
 # ② 已有产物（任意平台）→ 转换
 python "[path-to-skill]/scripts/to_openai.py" <product.json> --out chatgpt.json
+
+# 直接 POST 给 chat API（严格形态：只留 role / content）
+python "[path-to-skill]/scripts/to_openai.py" <product.json> --strict > messages.json
 
 # ③ 管道
 python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --format json | python "[path-to-skill]/scripts/to_openai.py" > chatgpt.json
@@ -137,7 +140,7 @@ python "[path-to-skill]/scripts/session_extract.py" --merge <导出包产物.jso
 | `scripts/merge_deepseek.py` | 跨源并集：导出包 × 分享链接按 `(node_id, type, 节点内序号)` 求并集，保留两侧原始容器 |
 | `scripts/verify_merged_deepseek.py` | 并集门禁自检：片段不丢、snippet 不丢、节点集合、逐文档 snippet 未被截短、同文档不重复 |
 | `scripts/deepseek_common.py` | 两条路径**共用**的归一规则：占位符标题识别、URL 锚点归一、派生字段剥离 |
-| `scripts/to_openai.py` | 产物 → ChatGPT / OpenAI 可用结构（messages 数组 + 引用映射 + 来源清单） |
+| `scripts/to_openai.py` | 产物 → ChatGPT 可用结构（messages 数组 + 引用映射 + 来源清单）；`--strict` 输出只含 `role`/`content` 的严格数组 |
 | `tests/test_deepseek_paths.py` | 回归测试（stdlib unittest，**合成数据**，不引第三方依赖） |
 
 ## 注意事项

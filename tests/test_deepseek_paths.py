@@ -326,8 +326,10 @@ def synthetic_export_product():
     账号导出包路径的形状：**不携带引用关系**。
 
     - RESPONSE fragment 只有 content / type，**没有 references[]**
-    - 正文里的 `[!reference:N]` 里，N 是**该消息搜索结果列表的下标**
-      （把该消息所有 TOOL_SEARCH/SEARCH 的 results 按顺序拍平后取第 N 个）
+    - 正文里的 `[!reference:N]` 里的 N 指向哪个页面，**无法还原**
+      （被引用的多数是 TOOL_OPEN，而导出包不导出 TOOL_OPEN 载荷）
+
+    → 所以正确行为是**如实标「该格式无法解析」+ 给候选来源池**，不是猜。
     """
     url_x = "https://example.invalid/x.html"
     url_y = "https://example.invalid/y.html"
@@ -433,6 +435,149 @@ class TestExportPathCitations(unittest.TestCase):
 
     def test_raw_mapping_preserved(self):
         self.assertIn("raw_mapping", self.out)
+
+
+# ============================================================
+# 引用标记的「精确 vs 候选」与 marker_kind
+# ============================================================
+
+class TestCitationPrecision(unittest.TestCase):
+    """
+    守住坑 8：TOOL_SEARCH 片段的结果是「这一轮检索到的全部」，
+    而 API 的 `references[N].urls` 给出的是**真正被引用的那几篇**。
+
+    把全部结果塞进 `sources` 不算错（被引用的那篇确实在其中），
+    但**指不出是哪一篇**——所以精确的进 `sources`，其余进 `candidates`。
+    """
+
+    def _product(self, refs, content, search_results):
+        msg = {
+            "message_id": 1, "role": "ASSISTANT", "inserted_at": 1700000000,
+            "fragments": [
+                {"id": 3, "type": "TOOL_SEARCH", "queries": [{"query": "合成样例"}],
+                 "results": search_results},
+                {"id": 5, "type": "RESPONSE", "content": content, "references": refs},
+            ],
+        }
+        transcript = [
+            {"seq": 0, "node_id": "1", "depth": 0, "type": "TOOL_SEARCH", "role": "tool",
+             "label": "联网搜索", "model": "", "timestamp": None, "sources": ["share"],
+             "queries": [{"query": "合成样例"}], "results": search_results},
+            {"seq": 1, "node_id": "1", "depth": 0, "type": "RESPONSE", "role": "assistant",
+             "label": "模型回答", "model": "", "timestamp": None, "sources": ["share"],
+             "content": content, "references": refs},
+        ]
+        return {"_meta": {"schema": "rescued-session/v1", "platform": "deepseek-web-share"},
+                "conversations": [{
+                    "id": "synthetic", "title": "【合成样例】", "title_is_placeholder": False,
+                    "title_source": "override", "stats": {}, "attachments": [],
+                    "transcript": transcript, "raw_messages": [msg]}]}
+
+    def test_declared_urls_are_the_exact_sources(self):
+        u_a = "https://example.invalid/a.html"
+        u_b = "https://example.invalid/b.html"
+        doc = self._product(
+            refs=[{"id": 3, "type": "TOOL_SEARCH", "urls": [u_b]}],
+            content="【合成样例】引用了B[reference:0]。",
+            search_results=[{"url": u_a, "title": "A"}, {"url": u_b, "title": "B"}])
+        out = to_openai.convert(doc)
+        a = [m for m in out["messages"] if m["role"] == "assistant"][0]
+        cite = a["citations"][0]
+        self.assertEqual([s["url"] for s in cite["sources"]], [u_b],
+                         "精确来源必须是 API 声明的那几篇")
+        cand_urls = {c["url"] for c in cite.get("candidates") or []}
+        self.assertIn(u_a, cand_urls, "其余检索结果应进 candidates，不进 sources")
+
+    def test_inline_marker_kind(self):
+        doc = self._product(
+            refs=[{"id": 3, "type": "TOOL_SEARCH", "urls": []}],
+            content="【合成样例】引用[reference:0]。",
+            search_results=[{"url": "https://example.invalid/a.html", "title": "A"}])
+        out = to_openai.convert(doc)
+        a = [m for m in out["messages"] if m["role"] == "assistant"][0]
+        self.assertEqual(a["citations"][0]["marker_kind"], "inline")
+
+    def test_no_marker_in_text_does_not_fabricate_inline_marker(self):
+        """
+        正文里没有行内标记时，**不能**拼一个 `[reference:N]` 出来——
+        那会造出正文里根本不存在的标记（还可能与真的 `[reference:6]` 撞名）。
+        """
+        doc = self._product(
+            refs=[{"id": 3, "type": "TOOL_SEARCH", "urls": []}],
+            content="【合成样例】正文里没有任何行内标记。",
+            search_results=[{"url": "https://example.invalid/a.html", "title": "A"}])
+        out = to_openai.convert(doc)
+        a = [m for m in out["messages"] if m["role"] == "assistant"][0]
+        for c in a.get("citations") or []:
+            self.assertEqual(c["marker_kind"], "fragment")
+            self.assertTrue(c["marker"].startswith("[fragment:"),
+                            "没有正文标记时只能用 fragment 形态，不能冒充 [reference:N]")
+
+    def test_marker_not_duplicated_across_messages(self):
+        """不同消息里的同名 fragment 不得产生同名 [reference:N] 标记。"""
+        doc = self._product(
+            refs=[{"id": 3, "type": "TOOL_SEARCH", "urls": []}],
+            content="【合成样例】没有标记。",
+            search_results=[{"url": "https://example.invalid/a.html", "title": "A"}])
+        out = to_openai.convert(doc)
+        markers = [c["marker"] for m in out["messages"] for c in (m.get("citations") or [])]
+        self.assertEqual(len(markers), len(set(markers)), "标记不得重名")
+
+
+class TestStrictOutput(unittest.TestCase):
+    """守住坑 9：富产物**不能**直接 POST 给严格的 chat API；--strict 才是。"""
+
+    def test_strict_is_role_content_only(self):
+        import subprocess
+        import sys as _sys
+        import tempfile
+        doc = synthetic_product()
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "p.json")
+            o = os.path.join(td, "m.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False)
+            r = subprocess.run(
+                [_sys.executable, "-I",
+                 os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "scripts", "to_openai.py"),
+                 p, "--strict", "--out", o],
+                capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(o, encoding="utf-8") as f:
+                msgs = json.load(f)
+            self.assertIsInstance(msgs, list)
+            for m in msgs:
+                self.assertEqual(sorted(m.keys()), ["content", "role"])
+                self.assertIn(m["role"], ("user", "assistant"))
+
+
+class TestIdempotentReconvert(unittest.TestCase):
+    """
+    守住坑 10：把**已经转换过**的产物再喂回来，不能静默产出 0 条 message。
+
+    静默丢数据比报错危险得多——用户会拿到一个空文件还以为「这段会话就这么长」。
+    """
+
+    def test_reconvert_keeps_messages(self):
+        once = to_openai.convert(synthetic_product())
+        twice = to_openai.convert(once)
+        self.assertEqual(len(twice["messages"]), len(once["messages"]))
+        self.assertTrue(twice["messages"])
+        for a, b in zip(once["messages"], twice["messages"]):
+            self.assertEqual(a["role"], b["role"])
+            self.assertEqual(a["content"], b["content"])
+
+    def test_reconvert_keeps_references(self):
+        once = to_openai.convert(synthetic_product())
+        twice = to_openai.convert(once)
+        self.assertEqual(len(twice["references"]), len(once["references"]))
+
+    def test_reconvert_keeps_reasoning(self):
+        once = to_openai.convert(synthetic_product())
+        twice = to_openai.convert(once)
+        self.assertEqual(twice["messages"][1].get("reasoning"),
+                         once["messages"][1].get("reasoning"))
 
 
 if __name__ == "__main__":

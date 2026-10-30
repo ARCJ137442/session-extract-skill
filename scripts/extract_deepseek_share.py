@@ -172,8 +172,18 @@ def fetch_share(share_id):
     doc = json.loads(text)
     if doc.get("code") not in (0, None):
         raise RuntimeError("share API error: code={} msg={}".format(doc.get("code"), doc.get("msg")))
-    if not doc.get("data", {}).get("biz_data", {}).get("messages"):
-        raise RuntimeError("share API returned no messages for share_id={}".format(share_id))
+    # ⚠️ 不存在 / 已失效的分享链接，API 返回的是
+    #    {"code":0,"data":{"biz_code":1,"biz_msg":"share does not exist","biz_data":null}}
+    # —— HTTP 200、code 也是 0，不拦的话后面会炸成
+    # "AttributeError: 'NoneType' object has no attribute 'get'"，用户完全看不懂。
+    data = doc.get("data") or {}
+    biz = data.get("biz_data") or {}
+    if not biz.get("messages"):
+        biz_msg = data.get("biz_msg") or ""
+        raise RuntimeError(
+            "分享链接不存在或已失效（share_id={}{}）。"
+            "请确认链接是否完整、是否已被撤销。".format(
+                share_id, "，API: {}".format(biz_msg) if biz_msg else ""))
     return text, doc
 
 
@@ -779,7 +789,15 @@ def main(argv=None):
         print("wrote {}".format(mp))
 
     if a.verify:
-        _raw, doc = fetch_share(payload.get("id"))
+        # 校验要重新取一次分享 API 原始文档；取不到时**不能报 PASS**——
+        # 「没验」和「验过了」是两回事（旧代码这里会甩裸 traceback）。
+        try:
+            _raw, doc = fetch_share(payload.get("id"))
+        except Exception as e:  # noqa: BLE001 — 网络异常要如实说明
+            print("=" * 60)
+            print("VERIFY RESULT: SKIPPED (未能取回原始响应，本次未校验: {}: {})".format(
+                type(e).__name__, e))
+            return 4
         v = verify_payload(payload, doc)
         print("=" * 60)
         print("VERIFY (多重集比较: transcript vs 分享 API 原始响应)")

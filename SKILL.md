@@ -123,15 +123,15 @@ python3 "[path-to-skill]/scripts/session_extract.py" --platform claude <file>
 
 ```powershell
 # Windows PowerShell：按关键词检索整个语料库（--kw 可重复）
-python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --kw 上传 --kw 同步
+python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某专有词 --kw 上传 --kw 同步
 
 # 限制条数 / 输出机器可读 JSON
-python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --top 10 --json
+python "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某专有词 --top 10 --json
 ```
 
 ```bash
 # macOS/Linux
-python3 "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某同步插件 --kw 上传 --kw 同步
+python3 "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json> --kw 某专有词 --kw 上传 --kw 同步
 ```
 
 打分规则（`scripts/extract_deepseek.py` 的 `scan_corpus`）：
@@ -140,9 +140,9 @@ python3 "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json>
 |------|------|--------|
 | 正文命中 | fragment 的 `content` + `results[].title/url` + `files[].file_name` 全量计数 | 用户记忆里的原话通常只在正文 |
 | 标题命中 | 视作该关键词**额外命中 100 次** | 标题是自动摘要，命中标题 ≈ 这场对话就是在讲它 |
-| 词频惩罚 | 按 IDF 加权（`log((N+1)/(df+1))+1`） | 「同步」「上传」这类通用词命中再多，也不该压过「某同步插件」这种专有词 |
+| 词频惩罚 | 按 IDF 加权（`log((N+1)/(df+1))+1`） | 「同步」「上传」这类通用词命中再多，也不该压过「某专有词」这种专有词 |
 | 命中位置 | 记录 `keyword@FRAGMENT_TYPE` | 一眼分辨「真话题」还是「顺带提到」 |
-| 大小写 | 不敏感 | `某同步插件` / `某专有词小写` / `某专有词全大写` 都要命中 |
+| 大小写 | 不敏感 | 专有词 / 它的全小写 / 全大写形式都要命中 |
 
 输出按加权得分降序，**同分时标题命中多的优先，再同则更新的会话优先**。
 检索结果里 `title_match` 非空的，就是真·主题候选。
@@ -157,10 +157,10 @@ python3 "[path-to-skill]/scripts/session_extract.py" --scan <conversations.json>
 
 ```powershell
 # Windows PowerShell
-python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id>,<会话 id> --out <out.json> --reason "打捞原因" --markdown --verify
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <id1>,<id2> --out <out.json> --reason "打捞原因" --markdown --verify
 
 # 一个会话一份文件（+ .md 预览 + 附件清单）
-python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <会话 id>,<会话 id> --outdir <dir> --markdown
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek <conversations.json> --ids <id1>,<id2> --outdir <dir> --markdown
 ```
 
 | 参数 | 说明 |
@@ -246,7 +246,7 @@ python3 "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url>
 |---|---|---|
 | `text`（`--print` 等价） | 可读全文：提问 / 搜索结果 / 回复（跳过 THINK 链） | 否 |
 | `json` | `rescued-session/v1` 产物（含 `_meta.source` 溯源：端点 + share_id + 响应 sha256，**以及 `_meta.verification` 自证结果**） | 否 |
-| `openai` | **ChatGPT 网页版 / OpenAI 兼容端点可直接吃**的 messages 结构 | 否 |
+| `openai` | **ChatGPT 网页版可直接上传**的产物：`messages` 数组 + 引用映射 + 来源清单 + 思考链。⚠️ 顶层带 `schema`/`meta`/`references` 等扩展字段，**不能直接 POST 给严格的 chat API**——那种场合用 `to_openai.py --strict`（只留 `role`/`content`） | 否 |
 | `raw` | 分享 API 原始 JSON（想自己再加工时用） | 否 |
 
 ```powershell
@@ -285,7 +285,8 @@ python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> 
 | 形态 | 命令 | 给谁吃 |
 |---|---|---|
 | `rescued-session/v1`（默认） | `--format json` / `--outdir` | 归档、审计、再分析 |
-| `chatgpt-import/v1` | `--format openai` / `--as openai` | ChatGPT 网页版、OpenAI 兼容端点、任何要 `messages` 数组的场合 |
+| `chatgpt-import/v1` | `--format openai` / `--as openai` | ChatGPT 网页版上传、需要引用映射与来源清单的场合 |
+| 严格 messages 数组 | `to_openai.py --strict` | 直接 POST 给 chat API（只要 `role`/`content`，不挑字段） |
 
 ```powershell
 # ① 分享链接 → ChatGPT 可用 JSON（一条命令）
@@ -293,6 +294,9 @@ python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> 
 
 # ② 已有产物 → 转换（任意平台都行）
 python "[path-to-skill]/scripts/to_openai.py" <product.json> --out chatgpt.json
+
+# 直接 POST 给 chat API（严格形态：只留 role / content）
+python "[path-to-skill]/scripts/to_openai.py" <product.json> --strict > messages.json
 
 # ③ 管道
 python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --format json \
@@ -349,7 +353,7 @@ python "[path-to-skill]/scripts/session_extract.py" --merge <导出包产物.jso
 > 踩过的坑：导出包的 `TOOL_SEARCH` 结果**非空但贫瘠**——每条只有 `{title, url}`，
 > 而分享链接侧每条还有 `snippet` / `site_name` / `published_at` / `cite_index`。
 > 「只在该字段为空时才补齐」的规则对非空字段不生效，于是**整列富载荷被丢弃**：
-> 实测 494 条结果的 **119,948 字符 snippet 归零**，丢掉的正包括 某 issue 那条关键线索的
+> 实测 494 条结果的 **119,948 字符 snippet 归零**，丢掉的正包括某条上游 issue 线索的
 > 发布说明原文。修法：按 `url` 逐条合并后，缺失的 snippet 才会被补上
 > （实测修复后 snippet 字符差 **0**）。
 >
@@ -463,7 +467,7 @@ git branch
 9. **不臆造** — 目标会话不在导出里时，如实报告"不在本次导出中"，并附证据（sha256 / 命中计数 / 数据时间边界），把候选全部交给用户挑，而不是拿一个"最像的"糊弄过去。
 10. **如实报告导出格式本身的信息损失** — 缺失的载荷要指名道姓，不能含糊带过。DeepSeek 的 `TOOL_OPEN`/`TOOL_FIND` 载荷未导出、附件只有元数据没有图片本体——这些是**导出格式的固有限制**，不是 Agent 漏捞了。产出「附件清单 + 每张图对应的提问」，并明确告知用户需回客户端取图。**Why:** 用户会以为"Agent 明明看到了会话，怎么没把图给我"——含糊其辞比明说"做不到"更伤信任。
 11. **元数据 ≠ 内容，要显式区分** — 附件、版本号、文件大小这类**描述性字段**不等于内容本身。清单里用 `bytes_available` / `bytes_available_in_export` 这类布尔字段把「有描述」和「有实体」分开标，跨源比对时才不会把缺字节当成缺记录。**Why:** 一个写着 `file_size: <字节数>` 的条目很容易被当成"图片就在那儿"，而实际上那 <字节数> 字节根本不在包里。
-12. **单一来源 ≠ 完整，跨源求并集并标注出处** — 账号导出包是某时刻的快照，分享链接只有最终态，两边各有独占内容（导出包多中间轮次与 某 issue 那类线索，分享链接多附件字节与 `TOOL_OPEN` 载荷）。**并集才是完整历史**，并用 `transcript[].sources[]` / `_meta.sources[]` 标注每个节点来自哪条路径。**Why:** 任何单一来源都有它自己的盲区，不标注出处就无法判断"某段内容到底从哪来、能不能信"。
+12. **单一来源 ≠ 完整，跨源求并集并标注出处** — 账号导出包是某时刻的快照，分享链接只有最终态，两边各有独占内容（导出包多中间轮次与上游 issue 那类线索，分享链接多附件字节与 `TOOL_OPEN` 载荷）。**并集才是完整历史**，并用 `transcript[].sources[]` / `_meta.sources[]` 标注每个节点来自哪条路径。**Why:** 任何单一来源都有它自己的盲区，不标注出处就无法判断"某段内容到底从哪来、能不能信"。
 13. **产物必须自带溯源** — 每份产物都要记下**它从哪来**：源文件路径 + sha256（或 share_id + 端点 + 响应 sha256）、抓取时间、逐项产物的来源。**Why:** 打捞产物会脱离原会话独立流传；没有溯源，三天后没人能证明它是哪一版对话、对应哪一份源数据。
 14. **归一规则只定义一次** — 「同物异形」（URL 带锚点、file_id 带前缀、标题占位符换文案）必须在**一个共享模块**里定义，提取侧与合并侧用同一把尺子。**Why:** 本 skill 已经吃过一次亏：附件 file_id 归一化了、URL 锚点没归一化，于是同一篇文章被当成多条、snippet 互相不补齐——而这类错误**不报错**，只会让数据静默变少。
 15. **没验 ≠ 验过了** — 校验跑不起来时**不能报 PASS**。跳过校验要如实标 `SKIPPED` 并用独立退出码区分。**Why:** 一个假的 PASS 会让下游以为产物已被自证；而「没验过」这个事实在产物里必须看得见。
@@ -476,8 +480,8 @@ git branch
 | Codex 会话文件名不透明 | 文件名格式 `rollout-YYYY-MM-DDTHH-MM-SS-<session-id>.jsonl`，`find` 用 session ID 前缀搜不到 | 用 `--session <id>` 让脚本自动递归搜索 |
 | Codex JSONL 格式与文档描述不一致 | `replay_state.prompt_input` 才是用户消息，不是 `event_msg` | 脚本已处理；如需手动解析，先 `head -1` 看 `session_meta` 确认是 Codex 格式 |
 | 大文件（>100MB）流式处理 | Codex 长会话 JSONL 可达 100MB+，`json.load` 全量读取会 OOM | 脚本逐行流式；手动提取也要逐行 `json.loads` |
-| 脚本 `--help` 不可用 | 脚本把未知参数当作文件路径解析，不识别 `--help` | 查阅本 SKILL.md 作为唯一文档来源 |
-| **DeepSeek 标题是自动摘要** | 标题由 DeepSeek 自动生成，和用户记忆里的措辞**经常**对不上——用户报的原话可能在正文里，一个字都不在标题里；但**也可能完全一致**（实战中目标会话真实标题就是「目标会话」） | **必须搜正文**：标题命中只是加权项，不能只搜标题。反过来也别假定标题一定对不上——两条路都要留 |
+| 脚本 `--help` 不可用 | **已修复**：`session_extract.py` 现在支持 `--help`/`-h`（打印完整用法并退出 0）。其余模块本来就用 argparse。 | 现在的用法以 `--help` 输出为准；本文档是「为什么这么做」，不是命令清单 |
+| **DeepSeek 标题是自动摘要** | 标题由 DeepSeek 自动生成，和用户记忆里的措辞**经常**对不上——用户报的原话可能在正文里，一个字都不在标题里；但**也可能完全一致**（实战中目标会话的真实标题与用户报的完全一致） | **必须搜正文**：标题命中只是加权项，不能只搜标题。反过来也别假定标题一定对不上——两条路都要留 |
 | **分享链接的占位符标题会变文案** | 分享 API 的 `title` 是占位符，但**字符串不是恒定的**：见过「来自分享的对话」，也见过英文的「Shared Conversation」。写死 `== "来自分享的对话"` 会让 `title_is_placeholder` **静默变成 False**——不报错，只是给出一个假的「一切正常」信号，而下游正是靠这个字段决定「要不要人工确认标题」 | 归一后**名单匹配**（`deepseek_common.is_placeholder_title`），别写死单个字符串；两条路径共用同一把尺子 |
 | **搜索结果的 URL 带引用锚点** | DeepSeek 的搜索结果 URL 形如 `.../paper.pdf#7#22#7`，**同一篇文档在不同引用位置锚点不同**。按原始 URL 建字典 = 同一篇文章被登记成多条记录、互相不补字段（实测 296 条结果里 262 个唯一原始 URL，只有 253 个唯一文档；按原始 URL 去重会吞掉 8,160 字符的 snippet） | 合并主键用**归一 URL**（`deepseek_common.norm_url`），原值保留在 `url_original`；同文档的多个摘要收进 `variants`，**只留第一条就是丢数据**。⚠️ 计算 fragment 签名时必须剥掉派生字段，否则自证会把自己判失败 |
 | **两条路径的引用标记语义不同** | 分享链接路径的 `[reference:N]` 里 N 是该消息 `references[]` 的**下标**；账号导出包路径**根本没有 references[]**，且被引用的 TOOL_OPEN 片段在导出包里**没有载荷**——原理上还原不出「哪个标记指向哪个页面」 | 两条路径分开处理（`to_openai.py`）。⚠️ **fragment id 在不同消息之间会重复**，查片段必须按消息作用域。⚠️ 还原不出就**如实标「无法解析」+ 给候选来源池，不要猜**——实测「标记 N → 搜索结果第 N 个」有 65/71 与真值不符，那是**把来源猜错了**；错误的来源比没有来源更糟 |
@@ -506,21 +510,21 @@ git branch
 
 ### 实战案例：DeepSeek 导出包会话打捞
 
-> **场景** (2026-10-29)：用户要从 DeepSeek 网页版导出的 `conversations.json` 里
-> 找回一条「某笔记软件 某同步插件 的设备卡在『状态显示为只能下载不能上传』，只能下载没法上传」的会话。
-> 用户报的是**状态描述**，真实标题是 `目标会话`（id `<会话 id>`，248 fragments / 25 轮提问 / 4 个附件）。
+> **场景**：用户要从 DeepSeek 网页版导出的 `conversations.json` 里，找回一条
+> 关于「某同步插件的设备只能下载、不能上传」的会话。
+> 用户报的是**状态描述**（设备状态栏里的一串字符），真实标题是
+> 「目标会话」（248 fragments / 25 轮提问 / 4 个附件）。
 
 **处理过程**：
 
-1. **先搜，别猜**。`--scan --kw 某同步插件 --kw 上传 --kw 同步` 扫全语料 fragment 正文，
-   出来三个 `title_match` 含 `某专有词小写` 的候选（`<会话 id>` / `<会话 id>` / `<会话 id>`），
-   外加一堆只命中通用词「上传」的无关会话（如 `某无关会话`）。
+1. **先搜，别猜**。`--scan --kw <插件名> --kw 上传 --kw 同步` 扫全语料 fragment 正文，
+   出来三个 `title_match` 命中插件名的候选，外加一堆只命中通用词「上传」的无关会话。
    → **标题命中是区分「真话题」和「顺带提到」的关键信号**，必须把 `title_match` 一起看。
-   → 注意标题**既可能**和用户措辞对不上（`<会话 id>` 的「目标会话」vs 用户报的
-   「状态显示为只能下载不能上传」），**也可能**完全一致（`<会话 id>` 的「目标会话」）。
+   → 注意标题**既可能**和用户措辞对不上（候选 A 的标题讲的是另一个子问题，
+   vs 用户报的「只能下载不能上传」），**也可能**完全一致（候选 B 的标题就是这个）。
    两条路都要留，别预设。
 2. **先证明数据边界，再下结论**。第一轮用的是从旧 zip 解压出来的文件夹（较少条会话，
-   sha256 `<sha256 前缀 A>…`，数据止于 2026-10-23），`grep -F "1 Sync"` 0 命中。
+   sha256 `<sha256 前缀 A>…`，数据止于 2026-10-23），按状态串 grep 0 命中。
    → 曾一度误判为「两份导出 md5 完全相同」，**实际是那次 `md5sum` 误报**：
    两个 zip 大小都不同（<大小 A> B vs <大小 B> B），内层 `conversations.json` 的 sha256
    分别是 `<sha256 前缀 A>…`(较少条会话) 和 `<sha256 前缀 B>…`(较多条会话)。

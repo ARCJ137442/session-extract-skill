@@ -44,6 +44,16 @@ try:
 except ImportError:  # pragma: no cover
     raise RuntimeError("deepseek_common.py is missing next to this script.")
 
+# stdout 编码钉死：Windows 上 stdout 被重定向到文件/管道时编码会从 UTF-8
+# 掉回 locale（中文 Windows = cp936），而本模块的输出含「⚠️」(U+26A0+VS16)
+# 等非 cp936 字符 —— 直接 UnicodeEncodeError 崩掉，产物 0 字节。
+# （写文件的地方本来就显式指定了 encoding="utf-8"，stdout 之前是漏的。）
+for _stream in ("stdout", "stderr"):
+    try:
+        getattr(sys, _stream).reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):  # pragma: no cover - 非标准流
+        pass
+
 SCHEMA = "chatgpt-import/v1"
 
 # 会话正文里可能出现的行内引用标记：分享链接侧是 [reference:N]，
@@ -185,6 +195,13 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
         doc = {"_meta": {}, "conversations": [product]}
         conv = product
 
+    # ⚠️ 幂等：输入**已经是**转换后的产物（chatgpt-import/v1，没有 transcript）
+    # 时，不能静默产出 0 条 message——那是最坏的结果（静默丢数据）。
+    # 这里把已有的 messages 直接沿用，让 `to_openai.py` 可以反复跑、可以接龙。
+    if not conv.get("transcript") and isinstance(conv.get("messages"), list):
+        return _reconvert(doc, conv, title=title, note=note, slim=slim,
+                          source_meta=source_meta)
+
     by_id, by_node_frag, by_node_type = _build_fragment_index(conv)
     order, grouped = _entries_by_node(conv)
 
@@ -306,6 +323,48 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
     return out
 
 
+def _reconvert(doc, conv, title=None, note=None, slim=False, source_meta=None):
+    """
+    已经是转换后产物（chatgpt-import/v1）时的**幂等重转**。
+
+    为什么需要：用户可能把上一次的产物再喂回来（换 --strict、换 --slim、
+    接龙加工）。如果这里静默产出 0 条 message，就是最坏的结果——
+    **静默丢数据**比报错危险得多。
+    """
+    messages = []
+    for m in conv.get("messages") or []:
+        entry = {"index": len(messages) + 1,
+                 "role": m.get("role"),
+                 "content": m.get("content") or ""}
+        for k in ("reasoning", "tips", "search_queries", "opened_pages",
+                  "citations", "fragments"):
+            if m.get(k):
+                entry[k] = m[k]
+        if not slim:
+            entry.setdefault("fragments", [])
+        messages.append(entry)
+
+    out = {
+        "schema": SCHEMA,
+        "title": title or conv.get("title"),
+        "note": note or conv.get("note"),
+        "meta": dict(conv.get("meta") or {}),
+        "messages": messages,
+        "references": conv.get("references") or [],
+    }
+    out["meta"].update({
+        "converted_at": _now_iso(),
+        "message_count": len(messages),
+        "user_turns": sum(1 for m in messages if m["role"] == "user"),
+        "assistant_turns": sum(1 for m in messages if m["role"] == "assistant"),
+        "lossless": not slim,
+        "idempotent_reconvert": True,
+    })
+    if source_meta:
+        out["meta"].update(source_meta)
+    return out
+
+
 def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node_id,
                        ref_store=None, msg_index=None):
     """
@@ -332,28 +391,42 @@ def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node
     seen = set()
 
     def resolve_ref(ref):
-        """references[] 的一项 → 来源 URL 列表。"""
+        """
+        references[] 的一项 → (精确来源, 候选来源)。
+
+        ⚠️ **精确 vs 候选要分开**：API 的 `references[N].urls` 给出的是
+        **真正被引用的那几篇**；而 fragment 自己的 results 是这一轮检索到的
+        **全部**结果（实测可达 49 条）。把全部结果塞进 `sources` 不算错
+        （被引用的那篇确实在其中），但**指不出是哪一篇**——
+        所以精确的进 `sources`，其余进 `candidates`。
+        """
         rid = str(ref.get("id"))
         hit = by_node_frag.get((str(node_id), rid)) or by_id.get(rid)
+        broad = []
         if hit:
             _nid, _rtype, results = hit
-            return [{"url": r.get("url_normalized") or norm_url(r.get("url")),
-                     "url_original": r.get("url_original") or r.get("url"),
-                     "title": r.get("title"),
-                     "snippet": r.get("snippet")}
-                    for r in results if isinstance(r, dict)]
-        cands = []
-        for frag in by_node_type.get((str(node_id), ref.get("type")), []):
-            for r in _frag_results(frag):
-                if isinstance(r, dict):
-                    cands.append({"url": norm_url(r.get("url")),
-                                  "url_original": r.get("url_original") or r.get("url"),
-                                  "title": r.get("title"),
-                                  "snippet": r.get("snippet")})
-        if not cands and ref.get("urls"):
-            cands = [{"url": norm_url(u), "url_original": u, "title": None, "snippet": None}
-                     for u in ref["urls"]]
-        return cands
+            broad = [{"url": r.get("url_normalized") or norm_url(r.get("url")),
+                      "url_original": r.get("url_original") or r.get("url"),
+                      "title": r.get("title"),
+                      "snippet": r.get("snippet")}
+                     for r in results if isinstance(r, dict)]
+        else:
+            for frag in by_node_type.get((str(node_id), ref.get("type")), []):
+                for r in _frag_results(frag):
+                    if isinstance(r, dict):
+                        broad.append({"url": norm_url(r.get("url")),
+                                      "url_original": r.get("url_original") or r.get("url"),
+                                      "title": r.get("title"),
+                                      "snippet": r.get("snippet")})
+        declared = [norm_url(u) for u in (ref.get("urls") or []) if u]
+        if declared:
+            by_url = {c["url"]: c for c in broad}
+            exact = []
+            for u in declared:
+                exact.append(by_url.get(u) or {"url": u, "url_original": u,
+                                               "title": None, "snippet": None})
+            return exact, broad
+        return broad, []
 
     # ---- A. 分享链接路径：标记 N 是 references[] 的下标 ----
     ref_list = []
@@ -368,36 +441,49 @@ def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node
             ref = ref_list[n] if 0 <= n < len(ref_list) else None
             if ref is None:
                 citations.append({
-                    "marker": m.group(0), "ref_type": "out-of-range",
+                    "marker": m.group(0), "marker_kind": "inline",
+                    "ref_type": "out-of-range",
                     "ref_id": n, "appears_in_content": True, "sources": [],
                 })
                 continue
-            cands = resolve_ref(ref)
+            cands, extra = resolve_ref(ref)
             citations.append({
                 "marker": m.group(0),
+                "marker_kind": "inline",
                 "ref_type": ref.get("type"),
                 "ref_id": ref.get("id"),
                 "appears_in_content": True,
                 "sources": cands,
             })
+            if extra:
+                citations[-1]["candidates"] = extra
+                citations[-1]["candidate_pool_size"] = len(extra)
             for c in cands:
                 if ref_store is not None:
                     _merge_reference(ref_store, c, msg_index)
     elif ref_list:
-        # 正文里没有标记、但 references[] 有内容——按 fragment id 逐条登记
+        # 正文里没有标记、但 references[] 有内容——按 fragment id 逐条登记。
+        # ⚠️ 这里**不能**拼成 `[reference:N]`：正文里根本没有这种标记，
+        # 拼出来会造出一个正文里不存在的标记（还可能与真的 `[reference:6]`
+        # 撞名）。用 `[fragment:N]` 区分，并在 marker_kind 里标明。
         for ref in ref_list:
             rid = str(ref.get("id"))
             if rid in seen:
                 continue
             seen.add(rid)
-            cands = resolve_ref(ref)
-            citations.append({
-                "marker": "[reference:%s]" % rid,
+            cands, extra = resolve_ref(ref)
+            entry = {
+                "marker": "[fragment:%s]" % rid,
+                "marker_kind": "fragment",
                 "ref_type": ref.get("type"),
                 "ref_id": ref.get("id"),
                 "appears_in_content": False,
                 "sources": cands,
-            })
+            }
+            if extra:
+                entry["candidates"] = extra
+                entry["candidate_pool_size"] = len(extra)
+            citations.append(entry)
             for c in cands:
                 if ref_store is not None:
                     _merge_reference(ref_store, c, msg_index)
@@ -434,6 +520,7 @@ def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node
         for m in markers:
             citations.append({
                 "marker": m.group(0),
+                "marker_kind": "inline",
                 "ref_type": "unresolvable-in-export-format",
                 "ref_id": int(m.group(1)),
                 "appears_in_content": True,
@@ -465,6 +552,9 @@ def main(argv=None):
     ap.add_argument("--title", default=None, help="覆盖标题")
     ap.add_argument("--slim", action="store_true",
                     help="去掉 fragments / raw_* 兜底，产出小文件（上传更快）")
+    ap.add_argument("--strict", action="store_true",
+                    help="输出**严格的** OpenAI chat messages 数组："
+                         "只有 role 与 content 两个字段，可直接 POST 给 chat API")
     ap.add_argument("--stats", action="store_true", help="只打印统计，不产出全文")
     a = ap.parse_args(argv)
 
@@ -472,7 +562,10 @@ def main(argv=None):
         with open(a.product, encoding="utf-8") as f:
             doc = json.load(f)
     else:
-        raw = sys.stdin.read()
+        # ⚠️ 必须显式用 utf-8 解码：Windows 上 stdin 的默认编码是 locale
+        # （中文 = cp936），而上游产物是 UTF-8 —— 直接 sys.stdin.read()
+        # 会抛 UnicodeDecodeError（实测 'gbk' codec can't decode byte 0x80）。
+        raw = sys.stdin.buffer.read().decode("utf-8")
         if not raw.strip():
             ap.error("没有输入：给一个产物文件路径，或用管道喂 stdin")
         doc = json.loads(raw)
@@ -481,6 +574,11 @@ def main(argv=None):
 
     if a.stats:
         sys.stderr.write(json.dumps(out["meta"], ensure_ascii=False, indent=2) + "\n")
+
+    if a.strict:
+        # 严格形态：只要 role/content —— chat.completions 这类接口不接受
+        # 顶层 schema / references / 每条消息上的 citations 等额外字段。
+        out = [{"role": m["role"], "content": m["content"]} for m in out["messages"]]
 
     text = json.dumps(out, ensure_ascii=False, indent=2)
     if a.out:

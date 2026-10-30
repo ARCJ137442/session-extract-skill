@@ -28,7 +28,7 @@
 - 全部**无需登录**，只需常规浏览器 `User-Agent` + `Referer: https://chat.deepseek.com/`。
 - ⚠️ **`/api/v0/share?share_id=` 是失效端点**：返回 200，但内容是 SPA 首页 HTML。
   脚本里显式拦了这个情况（见 `fetch_share()` 的 JSON 前缀检查），别改回老接口。
-- 分享链接形态：`https://chat.deepseek.com/share/<24位ID>`，ID 形如 `<18位ID>`。
+- 分享链接形态：`https://chat.deepseek.com/share/<24位ID>`，ID 形如 `<18位随机字符串>`。
 
 ## 三、⚠️ 通用套路：附件 URL 不在 DOM 里时，去前端 bundle 反查
 
@@ -77,10 +77,10 @@
 | 独有 | 3 个 `TIP` | **第 47/48 号整轮** |
 
 导出包多出的第 47/48 号轮次，是用户**编辑问题之前**的原始提问 + 回答；
-那个回答首次提出 **GitHub Issue 某 issue**（日志显示 `同步流程日志` 看似正常，
-但**全程无 push 阶段**、只跑 `pullOnly`、chunks 上传成功而 `f:` 元数据文档为空
+那个回答首次提出了一个**尚未关闭的上游 issue**（日志显示同步流程「已完成」看似正常，
+但**全程没有上传阶段**、只跑了拉取子命令、分片上传成功而元数据文档为空
 （`size:0, children:[]`）、**上传在写元数据前静默失败**）。
-用户随后编辑问题并重新生成，重新生成的版本不再提 某 issue，分享链接只保留最终态。
+用户随后编辑问题并重新生成，重新生成的版本不再提这个 issue，分享链接只保留最终态。
 
 > 也就是说：**分享链接不是「导出包的子集」，而是另一个时刻的快照。**
 > 谁少谁多取决于用户在网页端做了什么编辑。
@@ -198,7 +198,7 @@ python scripts/extract_deepseek_share.py <share_id | share_url> --print --title 
 # 机器可读：rescued-session/v1 产物 JSON（含 _meta.source 溯源 + _meta.verification 自证）
 python scripts/extract_deepseek_share.py <share_id | share_url> --format json
 
-# ⭐ ChatGPT 网页版 / OpenAI 兼容端点可直接吃（messages 数组）
+# ⭐ ChatGPT 网页版可直接上传（messages 数组 + 引用映射 + 来源清单）
 python scripts/extract_deepseek_share.py <share_id | share_url> --format openai --title "<真实会话名>"
 
 # 分享 API 原始 JSON

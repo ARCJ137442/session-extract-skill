@@ -12,7 +12,7 @@ Unified Session Extractor — 支持 Codex、Claude Code 和 DeepSeek 三种会�
     python session_extract.py --platform deepseek <conversations.json> --ids <id>[,<id>] --out <out.json>
     python session_extract.py --platform deepseek <conversations.json> --ids <id>[,<id>] --outdir <dir>
     python session_extract.py --platform deepseek-share <share_id|share_url> --outdir <dir>
-    python session_extract.py --scan <conversations.json> --kw 某同步插件 --kw 上传
+    python session_extract.py --scan <conversations.json> --kw 某专有词 --kw 上传
 """
 import json
 import os
