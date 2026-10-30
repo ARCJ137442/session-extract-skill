@@ -147,7 +147,9 @@ def _merge_reference(store, result, msg_index):
     if rec is None:
         rec = store[key] = {
             "url": key,
-            "url_original": url,
+            # 原始 URL 优先取源产物里的 url_original（并集产物的 url 已归一，
+            # 锚点只存在于 url_original 里）；没有才退回 url。
+            "url_original": result.get("url_original") or url,
             "url_anchor": result.get("url_anchor") or url_anchor(url),
             "title": None,
             "snippet": None,
@@ -243,7 +245,7 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
             if opened:
                 entry["opened_pages"] = [
                     {"url": r.get("url_normalized") or norm_url(r.get("url")),
-                     "url_original": r.get("url"),
+                     "url_original": r.get("url_original") or r.get("url"),
                      "title": r.get("title"),
                      "snippet": r.get("snippet")}
                     for r in opened if isinstance(r, dict)
@@ -336,7 +338,7 @@ def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node
         if hit:
             _nid, _rtype, results = hit
             return [{"url": r.get("url_normalized") or norm_url(r.get("url")),
-                     "url_original": r.get("url"),
+                     "url_original": r.get("url_original") or r.get("url"),
                      "title": r.get("title"),
                      "snippet": r.get("snippet")}
                     for r in results if isinstance(r, dict)]
@@ -345,7 +347,7 @@ def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node
             for r in _frag_results(frag):
                 if isinstance(r, dict):
                     cands.append({"url": norm_url(r.get("url")),
-                                  "url_original": r.get("url"),
+                                  "url_original": r.get("url_original") or r.get("url"),
                                   "title": r.get("title"),
                                   "snippet": r.get("snippet")})
         if not cands and ref.get("urls"):
@@ -425,7 +427,7 @@ def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node
                         seen_urls.add(u)
                         pool.append({
                             "url": u,
-                            "url_original": r.get("url"),
+                            "url_original": r.get("url_original") or r.get("url"),
                             "title": r.get("title"),
                             "snippet": r.get("snippet"),
                         })
