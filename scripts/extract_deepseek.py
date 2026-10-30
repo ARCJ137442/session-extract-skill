@@ -427,7 +427,9 @@ def extract(filepath, ids=None, reason=None):
         "schema": SCHEMA,
         "platform": PLATFORM,
         "source": {
-            "file": path,
+            # ⚠️ 只留**文件名**，不写绝对路径：产物会被转手发给别人，
+            # 绝对路径会泄露使用者的目录布局。sha256 已经足够定位同一份源文件。
+            "file": os.path.basename(path),
             "sha256": file_sha256(path),
             "conversation_count_in_source": len(corpus),
         },
@@ -446,7 +448,8 @@ def extract(filepath, ids=None, reason=None):
         "sources": [
             {
                 "kind": "export-bundle",
-                "file": path,
+                # 同上：只留文件名，不写绝对路径
+                "file": os.path.basename(path),
                 "sha256": file_sha256(path),
                 "conversation_count": len(corpus),
                 "node_ids": sorted(

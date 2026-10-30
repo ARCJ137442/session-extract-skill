@@ -523,18 +523,18 @@ git branch
    → 注意标题**既可能**和用户措辞对不上（候选 A 的标题讲的是另一个子问题，
    vs 用户报的「只能下载不能上传」），**也可能**完全一致（候选 B 的标题就是这个）。
    两条路都要留，别预设。
-2. **先证明数据边界，再下结论**。第一轮用的是从旧 zip 解压出来的文件夹（较少条会话，
-   sha256 `<sha256 前缀 A>…`，数据止于 2026-10-23），按状态串 grep 0 命中。
+2. **先证明数据边界，再下结论**。第一轮用的是从旧 zip 解压出来的文件夹
+   （会话条数较少、sha256 与手上的导出包不同、数据截止日期更早），按状态串 grep 0 命中。
    → 曾一度误判为「两份导出 md5 完全相同」，**实际是那次 `md5sum` 误报**：
-   两个 zip 大小都不同（<大小 A> B vs <大小 B> B），内层 `conversations.json` 的 sha256
-   分别是 `<sha256 前缀 A>…`(较少条会话) 和 `<sha256 前缀 B>…`(较多条会话)。
+   两个 zip 大小不同，内层 `conversations.json` 的 sha256 也不同（会话条数一少一多）。
    → **正确做法**：分别算 **zip 内层文件** 与 **解压出的文件夹文件** 的 sha256 并比对，
    不一致时**以 zip 为准**；不要相信文件夹名，也不要相信单次 `md5sum` 的输出。
+   （具体数值属于个人导出包指纹，不入库；方法本身与数字无关。）
 3. **打捞并自证**。`--platform deepseek --ids ...` 产出 `rescued-session/v1` JSON，
    `--verify` 做多重集比较：源 fragment 签名多重集 == 产物 transcript 多重集，
    `raw_mapping` 与源逐字相等 → **PASS**（三条会话全部 PASS，missing=0 duplicate=0）。
 4. **附件只能给清单**。目标会话带 4 个 FILE 附件，但导出 zip 里只有
-   `user.json`(<几百字节>) + `conversations.json`——**没有附件目录**，`FILE` fragment 只有
+   一个极小的 `user.json` + `conversations.json`——**没有附件目录**，`FILE` fragment 只有
    `file_id`/`file_name`/`file_size`。
    → 产出「附件清单 + 每张图对应的提问原文」，并明确告知用户**图片本体必须回客户端取**。
 

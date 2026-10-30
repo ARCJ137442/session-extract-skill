@@ -290,9 +290,12 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
         "title": title or conv.get("title"),
         "note": note or (
             "本文件是会话的无损转写。messages[] 字段对齐 OpenAI chat messages（role/content），"
-            "可整份上传到 ChatGPT 网页版（Projects 文件上传）或直接喂给任意 chat API；"
+            "可整份上传到 ChatGPT 网页版（Projects 文件上传）；"
+            "⚠️ 顶层与每条消息上带 schema/meta/references/citations 等扩展字段，"
+            "**不能直接 POST 给严格的 chat API**——那种场合用 --strict（只留 role/content）。"
             "reasoning 是思考链（不混进 content，避免污染对话）；"
-            "citations 把正文里的 [reference:N] 标记映射回来源 URL；"
+            "citations 把正文里的 [reference:N] 标记映射回来源 URL（精确来源在 sources，"
+            "其余检索结果在 candidates）；"
             "references 是按归一 URL 去重的来源清单（同一文档的不同变体收在 variants）。"
         ),
         "meta": {
@@ -300,6 +303,8 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
             "source_platform": (doc.get("_meta") or {}).get("platform"),
             "source_sha256": ((doc.get("_meta") or {}).get("source") or {}).get("sha256"),
             "source_share_url": ((doc.get("_meta") or {}).get("source") or {}).get("share_url"),
+            # 源产物里的自证结果随产物一起传下去（搬运不丢证据）
+            "source_verification": (doc.get("_meta") or {}).get("verification"),
             "converted_at": _now_iso(),
             "message_count": len(messages),
             "user_turns": sum(1 for m in messages if m["role"] == "user"),

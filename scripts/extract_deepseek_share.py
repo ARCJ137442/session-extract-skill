@@ -104,11 +104,10 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # 而下游正是靠这个字段决定「要不要人工确认标题」。
 # 归一规则统一放在 deepseek_common（提取侧与合并侧同一把尺子）。
 PLACEHOLDER_TITLE = "来自分享的对话"
-PLACEHOLDER_TITLES = (
-    "来自分享的对话",
-    "Shared Conversation",
-    "Shared conversation",
-)
+# ⚠️ 这里**不要**再抄一份占位符名单：判定统一走
+# deepseek_common.is_placeholder_title（名单更全，还处理空白归一）。
+# 本文件曾因此留下一份不完整的副本（少了带尾空格的变体），差点误导后来的人。
+# 所以：名单只存在于 deepseek_common 一处。
 
 # Fragment 类型 -> (role, 人类可读标签)。与 extract_deepseek.py 保持一致，
 # 另加 TIP（分享链接侧才有）。
@@ -563,6 +562,12 @@ def extract(share, title=None, reason=None, outdir=None, want_thumbnail=True):
     )
 
     meta = build_meta(raw_text, share_id, raw_messages, reason=reason, mode="extract")
+    # 自证随产物一起走：之前只有只读模式的 _meta 带 verification，
+    # 落盘产物没有 —— 那等于「每份产物自带无损自证」这句话只在一种形态上成立。
+    try:
+        meta["verification"] = verify_payload(payload, doc)
+    except Exception as e:  # noqa: BLE001 — 自证失败不能盖住主产物
+        meta["verification"] = {"ok": False, "error": repr(e)}
     return {"_meta": meta, "conversations": [payload]}
 
 
