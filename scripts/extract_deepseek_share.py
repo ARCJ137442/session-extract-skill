@@ -50,8 +50,39 @@ import json
 import os
 import re
 import sys
+import urllib.error
 import urllib.request
 from collections import Counter
+
+# 同目录共享模块（标题占位符识别、URL 锚点归一）。
+# 用 **append** 而不是 insert(0)：脚本目录排在 sys.path 末尾，
+# 不会遮蔽标准库同名模块（目录里若有个 json.py 也不会劫持 import json）。
+# 放末尾也能兼容 `python -I`（隔离模式不把脚本目录加进 sys.path）。
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+try:
+    from deepseek_common import (
+        is_placeholder_title,
+        normalize_title,
+        norm_url,
+        url_anchor,
+        strip_derived_result_fields,
+        result_url_key,
+    )
+except ImportError:  # pragma: no cover - 极少见：模块文件缺失
+    raise RuntimeError(
+        "deepseek_common.py is missing next to this script; "
+        "the two DeepSeek paths must share one normalisation rule set."
+    )
+
+# stdout 编码钉死：Windows 上 stdout 被重定向到文件/管道时编码会从
+# UTF-8 掉回 locale（中文 Windows = cp936），而本模块的输出含
+# 「⚠️」(U+26A0+VS16) 等非 cp936 字符 —— 直接 UnicodeEncodeError 崩掉。
+# 写文件的地方本来就显式指定了 encoding="utf-8"，stdout 之前是漏的。
+for _stream in ("stdout", "stderr"):
+    try:
+        getattr(sys, _stream).reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):  # pragma: no cover - 非标准流
+        pass
 
 PLATFORM = "deepseek-web-share"
 SCHEMA = "rescued-session/v1"
@@ -67,7 +98,17 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
 
 # 账号导出路径里，标题是真实会话名；分享链接侧是占位符。
+# ⚠️ 占位符文案**会变**：实测见过「来自分享的对话」，也见过英文的
+# 「Shared Conversation」。写死 `== "来自分享的对话"` 会让 title_is_placeholder
+# 静默变成 False —— 不报错，只是给出一个假的「一切正常」信号，
+# 而下游正是靠这个字段决定「要不要人工确认标题」。
+# 归一规则统一放在 deepseek_common（提取侧与合并侧同一把尺子）。
 PLACEHOLDER_TITLE = "来自分享的对话"
+PLACEHOLDER_TITLES = (
+    "来自分享的对话",
+    "Shared Conversation",
+    "Shared conversation",
+)
 
 # Fragment 类型 -> (role, 人类可读标签)。与 extract_deepseek.py 保持一致，
 # 另加 TIP（分享链接侧才有）。
@@ -182,14 +223,44 @@ def frag_results(frag):
     return None
 
 
+def enrich_results(results):
+    """
+    给结果条目补**派生**字段：`url_normalized`（剥掉引用锚点）+ `url_anchor`。
+
+    为什么：DeepSeek 的搜索结果 URL 带引用锚点（`.../paper.pdf#7#22#7`），
+    **同一篇文档在不同引用位置锚点不同**。按原始 URL 建字典 = 同一篇文章
+    被登记成多条记录、互相不补字段（实测 296 条结果里 262 个唯一原始 URL，
+    只有 253 个唯一文档；按原始 URL 去重会吞掉 8,160 字符的 snippet）。
+
+    ⚠️ 必须是**副本**：raw_messages 要保持逐字原样（自证断言
+    `raw_messages_identical` 依赖它），就地改会污染兜底数据。
+    原始 `url` 字段也保留不动 —— 那是源数据，锚点是引用位置的真实信息。
+    """
+    out = []
+    for r in results or []:
+        if not isinstance(r, dict):
+            out.append(r)
+            continue
+        url = r.get("url")
+        item = dict(r)
+        item["url_normalized"] = norm_url(url)
+        item["url_anchor"] = url_anchor(url)
+        out.append(item)
+    return out
+
+
 def frag_signature(frag):
     """
     fragment 的多重集签名——用于「打捞后自证没丢没重」。
 
     与 extract_deepseek.frag_signature 保持同一形状（type / content /
     results / files），这样两条路径的产物可以直接做多重集 diff。
+
+    ⚠️ 计算签名时必须剥掉**派生**字段（url_normalized / url_anchor）：
+    transcript 里的 results 带派生字段、源 fragment 里不带，不剥就会
+    把「同一份数据」判成「源里有、产物里没有」——自证会自己把自己判失败。
     """
-    results = frag_results(frag)
+    results = strip_derived_result_fields(frag_results(frag))
     files = frag.get("files")
     return (
         frag.get("type"),
@@ -345,7 +416,8 @@ def build_transcript(biz):
             entry["content"] = frag["content"]
         results = frag_results(frag)
         if results is not None:
-            entry["results"] = results
+            # 补派生字段（副本，不动源数据）
+            entry["results"] = enrich_results(results)
         if frag.get("files") is not None:
             entry["files"] = frag["files"]
         if frag.get("queries") is not None:
@@ -395,7 +467,8 @@ def build_payload(biz, raw_messages, attachments, reason=None, title=None, share
     return {
         "id": share_id,
         "title": resolved_title,
-        "title_is_placeholder": bool(title is None and api_title == PLACEHOLDER_TITLE),
+        # 名单化识别，不再依赖某一个文案（DeepSeek 改文案/语言就会失配）
+        "title_is_placeholder": bool(title is None and is_placeholder_title(api_title)),
         "title_source": "override" if title else "share-api",
         "inserted_at": stats.get("inserted_at"),
         "updated_at": stats.get("updated_at"),
@@ -406,6 +479,52 @@ def build_payload(biz, raw_messages, attachments, reason=None, title=None, share
         # 原样保留源消息数组：transcript 只是给人读的视图，任何重分析都从这份兜底。
         # 注意键名与导出包路径不同——分享链接没有聊天树，就是一个线性数组。
         "raw_messages": raw_messages,
+    }
+
+
+def build_meta(raw_text, share_id, raw_messages, reason=None, mode="extract"):
+    """
+    打捞产物的 _meta 外壳——**落盘模式与只读模式共用同一份**。
+
+    以前只读模式（--format json）用的是一份「精简版」_meta，缺 sources /
+    extraction / 计数，跟落盘产物对不上：同一个 skill 出两种元数据形状，
+    下游要写两套解析。现在统一走这里。
+    """
+    return {
+        "schema": SCHEMA,
+        "platform": PLATFORM,
+        "source": {
+            "kind": "share-link",
+            "share_id": share_id,
+            "share_url": SHARE_PAGE + share_id,
+            "endpoint": "GET " + SHARE_API + share_id,
+            "sha256": text_sha256(raw_text),
+            "message_count_in_source": len(raw_messages),
+            "fragment_count_in_source": sum(len(m.get("fragments") or []) for m in raw_messages),
+            "attachment_endpoint": "GET " + FILE_HOST + "<signed_path>&ty=p",
+            "captured_at": datetime.datetime.now(TZ).isoformat(),
+        },
+        # 跨源并集用：本路径覆盖了哪些节点
+        "sources": [{
+            "kind": "share-link",
+            "share_id": share_id,
+            "sha256": text_sha256(raw_text),
+            "message_count": len(raw_messages),
+            "fragment_count": sum(len(m.get("fragments") or []) for m in raw_messages),
+            "node_ids": [str(m.get("message_id")) for m in raw_messages],
+        }],
+        "extraction": {
+            "tool": "extract_deepseek_share.py",
+            "mode": mode,
+            "requested_ids": [share_id],
+            "rescue_reason": reason,
+            "note": (
+                "transcript = linear message array from the share API (no chat tree "
+                "to linearise); raw_messages kept verbatim for full fidelity; "
+                "attachment bytes fetched from files.deepseeksvc.com."
+            ),
+        },
+        "conversation_count": 1,
     }
 
 
@@ -433,42 +552,7 @@ def extract(share, title=None, reason=None, outdir=None, want_thumbnail=True):
         reason=reason, title=title, share_id=share_id,
     )
 
-    meta = {
-        "schema": SCHEMA,
-        "platform": PLATFORM,
-        "source": {
-            "kind": "share-link",
-            "share_id": share_id,
-            "share_url": SHARE_PAGE + share_id,
-            "endpoint": "GET " + SHARE_API + share_id,
-            "sha256": text_sha256(raw_text),
-            "message_count_in_source": len(raw_messages),
-            "fragment_count_in_source": sum(len(m.get("fragments") or []) for m in raw_messages),
-            "attachment_endpoint": "GET " + FILE_HOST + "<signed_path>&ty=p",
-            "captured_at": datetime.datetime.now(TZ).isoformat(),
-        },
-        # 跨源并集用：本路径覆盖了哪些节点
-        "sources": [{
-            "kind": "share-link",
-            "share_id": share_id,
-            "sha256": text_sha256(raw_text),
-            "message_count": len(raw_messages),
-            "fragment_count": sum(len(m.get("fragments") or []) for m in raw_messages),
-            "node_ids": [str(m.get("message_id")) for m in raw_messages],
-        }],
-        "extraction": {
-            "tool": "extract_deepseek_share.py",
-            "mode": "extract",
-            "requested_ids": [share_id],
-            "rescue_reason": reason,
-            "note": (
-                "transcript = linear message array from the share API (no chat tree "
-                "to linearise); raw_messages kept verbatim for full fidelity; "
-                "attachment bytes fetched from files.deepseeksvc.com."
-            ),
-        },
-        "conversation_count": 1,
-    }
+    meta = build_meta(raw_text, share_id, raw_messages, reason=reason, mode="extract")
     return {"_meta": meta, "conversations": [payload]}
 
 
@@ -607,14 +691,17 @@ def main(argv=None):
     ap.add_argument("share", help="share_id 或完整分享链接")
     ap.add_argument("--outdir", default=None,
                     help="输出目录（附件落在 <outdir>/附件/）；不与 --format 同用")
-    ap.add_argument("--format", choices=("text", "json", "raw"), default=None,
-                    help="只读到 stdout，不落盘：text=可读全文，json=rescued-session/v1 产物，raw=API 原始 JSON")
+    ap.add_argument("--format", choices=("text", "json", "openai", "raw"), default=None,
+                    help="只读到 stdout，不落盘：text=可读全文，json=rescued-session/v1 产物，"
+                         "openai=ChatGPT/OpenAI 可直接用的 messages 结构，raw=API 原始 JSON")
     ap.add_argument("--print", dest="do_print", action="store_true",
                     help="等价于 --format text（可读全文打到 stdout，不落盘）")
     ap.add_argument("--title", default=None, help="真实会话名（分享 API 只给占位符）")
     ap.add_argument("--reason", default=None, help="打捞理由")
     ap.add_argument("--markdown", action="store_true", help="同时写 .md 预览（需 --outdir）")
     ap.add_argument("--no-thumbnail", action="store_true", help="不下载缩略图")
+    ap.add_argument("--slim", action="store_true",
+                    help="--format openai 时去掉 fragments/raw 兜底，产出小文件（上传更快）")
     ap.add_argument("--verify", action="store_true", help="多重集自证")
     a = ap.parse_args(argv)
 
@@ -626,24 +713,44 @@ def main(argv=None):
 
     # ---- 只读模式：读到 stdout，不落盘，也不下载附件 ----
     if fmt:
-        share_id = normalise_share_id(a.share)
-        raw_text, doc = fetch_share(share_id)
+        # 网络异常要**如实报错**而不是抛栈：以前这条分支完全没有 try/except，
+        # urllib 的 HTTPError/URLError 直接把 traceback 甩到调用方脸上。
+        try:
+            share_id = normalise_share_id(a.share)
+            raw_text, doc = fetch_share(share_id)
+        except (OSError, RuntimeError, ValueError) as e:
+            sys.stderr.write("ERROR: {}\n".format(e))
+            return 2
         if fmt == "raw":
             sys.stdout.write(raw_text)
             return 0
         biz = doc["data"]["biz_data"]
+        raw_messages = biz.get("messages") or []
         payload = build_payload(
-            biz, biz.get("messages") or [],
+            biz, raw_messages,
             download_attachments(biz, None, download=False),
             reason=a.reason, title=a.title, share_id=share_id)
+        meta = build_meta(raw_text, share_id, raw_messages, reason=a.reason, mode="read-only")
+
+        if fmt == "openai":
+            # 「零长脚本」的关键一步：直接把会话变成 ChatGPT 网页版 / OpenAI
+            # 兼容端点能吃的结构，不用再自己写转换器。
+            from to_openai import convert
+            out = convert({"_meta": meta, "conversations": [payload]},
+                          title=a.title, slim=a.slim)
+            sys.stdout.write(json.dumps(out, ensure_ascii=False, indent=2))
+            return 0
+
+        # 只读模式也必须**自证**：把 verify 结果写进 _meta，
+        # 让「产物没丢没重」这件事随产物一起流转，而不是靠人记得跑 --verify。
+        try:
+            meta["verification"] = verify_payload(payload, doc)
+        except Exception as e:  # noqa: BLE001 — 自证失败不能盖住主产物
+            meta["verification"] = {"ok": False, "error": repr(e)}
+
         if fmt == "json":
             sys.stdout.write(json.dumps(
-                {"_meta": {"schema": SCHEMA, "platform": PLATFORM,
-                           "source": {"kind": "share-link", "share_id": share_id,
-                                      "share_url": SHARE_PAGE + share_id,
-                                      "endpoint": "GET " + SHARE_API + share_id,
-                                      "sha256": text_sha256(raw_text)}},
-                 "conversations": [payload]},
+                {"_meta": meta, "conversations": [payload]},
                 ensure_ascii=False, indent=2))
         else:
             sys.stdout.write(render_markdown(payload))
