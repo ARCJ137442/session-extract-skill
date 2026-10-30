@@ -95,11 +95,52 @@
 
 **跨源比对正文前必须先剥/加回这些标记**，否则会把 19 个节点误判为内容差异。
 
+> 分享侧正文里的标记形态是 `[reference:N]`（无 `!`），
+> 两种形态都要能识别——`to_openai.py` 的引用映射两种都处理。
+
 ### 3. TOOL_OPEN 载荷
 
 分享链接侧 `TOOL_OPEN` 带 `result{url,title,snippet}`；
 导出包侧该载荷**根本没导出**。跨源多重集比对时这会表现为"源里有、产物里没有"——
 **这是来源差异，不是打捞丢失**，不要当成 bug 修。
+
+### 4. ⚠️ 搜索结果 URL 带引用锚点
+
+DeepSeek 的搜索结果 URL 形如：
+
+```
+https://example.org/docs/paper.pdf#7#22#7
+https://example.org/docs/paper.pdf#1#1#1
+```
+
+**同一篇文档在不同引用位置锚点不同。** 按原始 URL 建字典的后果：
+
+| 做法 | 后果 |
+|---|---|
+| 按原始 URL 建键 | 同一篇文章被登记成多条记录 → **互相不补字段**；去重时静默吞掉 snippet |
+| 按归一 URL 建键 | 一篇文档一条记录；不同轮次的摘要收进 `variants` |
+
+实测（一次 296 条搜索结果的会话）：唯一原始 URL 262 个，
+唯一**文档**只有 253 个；按原始 URL 去重会丢掉 **8,160 个字符（11.4%）**的 snippet。
+
+**规则**（`deepseek_common.norm_url`，提取侧与合并侧共用）：
+
+- 主键用归一 URL（`#` 之后是锚点，去掉）
+- 原值保留在 `url_original`，锚点保留在 `url_anchor`
+- 同一文档的多个 (title, snippet) 组合**全部保留**在 `variants` 里
+- ⚠️ 计算 fragment 签名时必须**剥掉派生字段**（`url_normalized` / `url_anchor`），
+  否则「源 vs 产物」的多重集比较会全是噪声，自证会把自己判失败
+
+### 5. ⚠️ 占位符标题的文案会变
+
+分享 API 的 `title` 是占位符，但**字符串不是恒定的**：
+见过中文的「来自分享的对话」，也见过英文的「Shared Conversation」。
+
+写死 `== "来自分享的对话"` 的后果：`title_is_placeholder` **静默变成 False**——
+不报错，只是给出一个假的「一切正常」信号；而下游正是靠这个字段决定
+「要不要人工确认标题」。
+
+规则：`deepseek_common.is_placeholder_title` —— 归一空白后**名单匹配**。
 
 ## 五、跨源并集怎么做
 
@@ -131,8 +172,11 @@
 # 可读全文（提问 / 搜索结果 / 回复，跳过 THINK 链）
 python scripts/extract_deepseek_share.py <share_id | share_url> --print --title "<真实会话名>"
 
-# 机器可读：rescued-session/v1 产物 JSON（含 _meta.source 溯源）
+# 机器可读：rescued-session/v1 产物 JSON（含 _meta.source 溯源 + _meta.verification 自证）
 python scripts/extract_deepseek_share.py <share_id | share_url> --format json
+
+# ⭐ ChatGPT 网页版 / OpenAI 兼容端点可直接吃（messages 数组）
+python scripts/extract_deepseek_share.py <share_id | share_url> --format openai --title "<真实会话名>"
 
 # 分享 API 原始 JSON
 python scripts/extract_deepseek_share.py <share_id | share_url> --format raw
@@ -142,11 +186,17 @@ python scripts/extract_deepseek_share.py <share_id | share_url> --format raw
 |---|---|---|
 | `text`（`--print` 等价） | 可读全文 | 否 |
 | `json` | `rescued-session/v1` 产物 | 否 |
+| `openai` | `chatgpt-import/v1` 产物（messages 数组 + 引用映射 + 来源清单） | 否 |
 | `raw` | API 原始 JSON | 否 |
 
 - **只读模式不下载附件字节**（省流量），但附件清单**仍如实报出数量与文件名**
   （`bytes_available: false`），不会写成「0 个附件」。
 - `--format` / `--print` 与 `--outdir` **互斥**：要落盘用 `--outdir`，要读出来用 `--format`。
+- **只读模式也自证**：`--format json` 的 `_meta.verification` 里带着多重集自证结果
+  （源 fragment 签名多重集 vs 产物多重集 + `raw_messages` 逐字比对），
+  不用另外跑 `--verify`。
+- **`--slim`**（配合 `--format openai`）：去掉 `fragments` / `raw_*` 兜底，
+  产出小文件——上传到 ChatGPT 网页版更快，但**不再是无损产物**。
 
 ### 6.2 落盘模式（含附件字节）
 

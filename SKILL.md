@@ -245,7 +245,8 @@ python3 "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url>
 | `--format` | stdout 内容 | 落盘 |
 |---|---|---|
 | `text`（`--print` 等价） | 可读全文：提问 / 搜索结果 / 回复（跳过 THINK 链） | 否 |
-| `json` | `rescued-session/v1` 产物（含 `_meta.source` 溯源：端点 + share_id + 响应 sha256） | 否 |
+| `json` | `rescued-session/v1` 产物（含 `_meta.source` 溯源：端点 + share_id + 响应 sha256，**以及 `_meta.verification` 自证结果**） | 否 |
+| `openai` | **ChatGPT 网页版 / OpenAI 兼容端点可直接吃**的 messages 结构 | 否 |
 | `raw` | 分享 API 原始 JSON（想自己再加工时用） | 否 |
 
 ```powershell
@@ -254,19 +255,67 @@ python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> 
 
 # 原始 API JSON
 python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --format raw
+
+# ⭐ 直接得到 ChatGPT 网页版可上传的 JSON（一条命令，零长脚本）
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --format openai --title "真实会话名" > chatgpt.json
 ```
 
 | 要点 | 说明 |
 |------|------|
 | **只读不下载附件字节** | 省流量。附件清单**仍如实报出数量与文件名**（`bytes_available: false`），不会写成"0 个附件" |
 | **`--format` 与 `--outdir` 互斥** | 要落盘用 `--outdir`，要读出来用 `--format`/`--print` |
-| **标题仍是占位符** | 分享 API 的 `title` 恒为「来自分享的对话」，真实会话名要 `--title` 传；不传只是 `title_is_placeholder=true`，不影响读内容 |
+| **标题仍是占位符** | 分享 API 的 `title` 是**占位符**（文案会变：见过「来自分享的对话」，也见过英文的「Shared Conversation」）。真实会话名要 `--title` 传；不传只是 `title_is_placeholder=true`，不影响读内容 |
+| **只读模式也自证** | `--format json` 的 `_meta.verification` 里带着多重集自证结果（没丢没重），不用另外跑 `--verify` |
 | **不需要账号导出** | 只要一个链接即可，不用走「导出数据」 |
 
 > **什么时候该用哪个**：
 > - 只拿到一个链接、只是要读 → **`--print`**（本节）
+> - 要把会话**喂给另一个 LLM / ChatGPT 网页版** → **`--format openai`**
 > - 要拿**图片字节** → `--outdir`（附件落在 `<dir>/附件/`）
 > - 要和导出包路径**求并集** → 两条路径各跑一次，再 `--merge` / `--merge-with`
+
+### 「零长脚本」原则（本 skill 的迭代方向）
+
+> **目标：不需要写任何长脚本，就能丝滑提取会话信息。**
+
+跨工具搬运是重复劳动：折叠 fragment 成 role/content、把工具调用收成引用映射、
+归一 URL 锚点、给思考链找落脚点——这些规则**平台无关**，不该每次都烧在
+一个临时脚本里。所以本 skill 提供**两种产物形态**：
+
+| 形态 | 命令 | 给谁吃 |
+|---|---|---|
+| `rescued-session/v1`（默认） | `--format json` / `--outdir` | 归档、审计、再分析 |
+| `chatgpt-import/v1` | `--format openai` / `--as openai` | ChatGPT 网页版、OpenAI 兼容端点、任何要 `messages` 数组的场合 |
+
+```powershell
+# ① 分享链接 → ChatGPT 可用 JSON（一条命令）
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --format openai > chatgpt.json
+
+# ② 已有产物 → 转换（任意平台都行）
+python "[path-to-skill]/scripts/to_openai.py" <product.json> --out chatgpt.json
+
+# ③ 管道
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> --format json \
+    | python "[path-to-skill]/scripts/to_openai.py" > chatgpt.json
+
+# ④ 调度器统一入口：打捞 + 转换一次完成（多写一份 <base>.openai.json）
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <share_id|share_url> --as openai --outdir <dir>
+```
+
+**产物契约**（`chatgpt-import/v1`）：
+
+| 字段 | 说明 |
+|---|---|
+| `messages[]` | `role` / `content`，字段对齐 OpenAI chat messages |
+| `messages[].reasoning` | 思考链**单独放**，不混进 `content`（混进去会污染对话流） |
+| `messages[].citations` | 正文 `[reference:N]` 标记 → 来源 URL 的映射 |
+| `messages[].fragments` | 原始 fragment 全字段（`--slim` 可去掉） |
+| `references[]` | 按**归一 URL**去重的来源清单；同一文档的不同变体收在 `variants` |
+| `raw_messages` / `raw_mapping` | 源容器逐字副本（无损兜底） |
+
+**保真原则：只搬运，不改写。** 正文一字不动；归一结果只做**新增**
+（`url_normalized` / `url_anchor`），绝不覆盖源数据里的任何字段。
+
 
 ### 跨源并集模式
 
@@ -386,6 +435,8 @@ git branch
 
 用户只给了一个 DeepSeek 分享链接？
 └─ YES → --platform deepseek-share <share_id|url> --title "<真实会话名>" --outdir <dir>
+        → 只是要读？--format text（不落盘）
+        → 要喂给另一个 LLM / ChatGPT 网页版？--format openai（或 --as openai 额外写一份）
 ```
 
 **导出包 vs 分享链接怎么选**：
@@ -397,6 +448,7 @@ git branch
 | 要**中间轮次**（用户改过的原始提问） | **导出包**（分享链接只有最终态） |
 | 要 `TOOL_OPEN` 载荷 | **分享链接**（导出包未导出该载荷） |
 | 要最完整的历史 | **两条都跑，求并集** |
+| 要**喂给别的 LLM** | 任一条 + `--format openai` / `to_openai.py`（搬运规则不用重写） |
 
 ## 核心原则
 
@@ -413,6 +465,9 @@ git branch
 11. **元数据 ≠ 内容，要显式区分** — 附件、版本号、文件大小这类**描述性字段**不等于内容本身。清单里用 `bytes_available` / `bytes_available_in_export` 这类布尔字段把「有描述」和「有实体」分开标，跨源比对时才不会把缺字节当成缺记录。**Why:** 一个写着 `file_size: <字节数>` 的条目很容易被当成"图片就在那儿"，而实际上那 <字节数> 字节根本不在包里。
 12. **单一来源 ≠ 完整，跨源求并集并标注出处** — 账号导出包是某时刻的快照，分享链接只有最终态，两边各有独占内容（导出包多中间轮次与 某 issue 那类线索，分享链接多附件字节与 `TOOL_OPEN` 载荷）。**并集才是完整历史**，并用 `transcript[].sources[]` / `_meta.sources[]` 标注每个节点来自哪条路径。**Why:** 任何单一来源都有它自己的盲区，不标注出处就无法判断"某段内容到底从哪来、能不能信"。
 13. **产物必须自带溯源** — 每份产物都要记下**它从哪来**：源文件路径 + sha256（或 share_id + 端点 + 响应 sha256）、抓取时间、逐项产物的来源。**Why:** 打捞产物会脱离原会话独立流传；没有溯源，三天后没人能证明它是哪一版对话、对应哪一份源数据。
+14. **归一规则只定义一次** — 「同物异形」（URL 带锚点、file_id 带前缀、标题占位符换文案）必须在**一个共享模块**里定义，提取侧与合并侧用同一把尺子。**Why:** 本 skill 已经吃过一次亏：附件 file_id 归一化了、URL 锚点没归一化，于是同一篇文章被当成多条、snippet 互相不补齐——而这类错误**不报错**，只会让数据静默变少。
+15. **没验 ≠ 验过了** — 校验跑不起来时**不能报 PASS**。跳过校验要如实标 `SKIPPED` 并用独立退出码区分。**Why:** 一个假的 PASS 会让下游以为产物已被自证；而「没验过」这个事实在产物里必须看得见。
+16. **搬运规则沉淀在 skill 里，不在临时脚本里** — 跨工具搬运（转成 ChatGPT / OpenAI 可用的 messages 数组）是**重复劳动**：折叠 fragment、映射引用、归一锚点、分离思考链——这些规则平台无关。**Why:** 同一套规则每次重写一遍，既慢又会漂移；用户在临时脚本里踩的坑（比如锚点没归一）下次还会踩。
 
 ## 已知坑与应对
 
@@ -423,6 +478,8 @@ git branch
 | 大文件（>100MB）流式处理 | Codex 长会话 JSONL 可达 100MB+，`json.load` 全量读取会 OOM | 脚本逐行流式；手动提取也要逐行 `json.loads` |
 | 脚本 `--help` 不可用 | 脚本把未知参数当作文件路径解析，不识别 `--help` | 查阅本 SKILL.md 作为唯一文档来源 |
 | **DeepSeek 标题是自动摘要** | 标题由 DeepSeek 自动生成，和用户记忆里的措辞**经常**对不上——用户报的原话可能在正文里，一个字都不在标题里；但**也可能完全一致**（实战中目标会话真实标题就是「目标会话」） | **必须搜正文**：标题命中只是加权项，不能只搜标题。反过来也别假定标题一定对不上——两条路都要留 |
+| **分享链接的占位符标题会变文案** | 分享 API 的 `title` 是占位符，但**字符串不是恒定的**：见过「来自分享的对话」，也见过英文的「Shared Conversation」。写死 `== "来自分享的对话"` 会让 `title_is_placeholder` **静默变成 False**——不报错，只是给出一个假的「一切正常」信号，而下游正是靠这个字段决定「要不要人工确认标题」 | 归一后**名单匹配**（`deepseek_common.is_placeholder_title`），别写死单个字符串；两条路径共用同一把尺子 |
+| **搜索结果的 URL 带引用锚点** | DeepSeek 的搜索结果 URL 形如 `.../paper.pdf#7#22#7`，**同一篇文档在不同引用位置锚点不同**。按原始 URL 建字典 = 同一篇文章被登记成多条记录、互相不补字段（实测 296 条结果里 262 个唯一原始 URL，只有 253 个唯一文档；按原始 URL 去重会吞掉 8,160 字符的 snippet） | 合并主键用**归一 URL**（`deepseek_common.norm_url`），原值保留在 `url_original`；同文档的多个摘要收进 `variants`，**只留第一条就是丢数据**。⚠️ 计算 fragment 签名时必须剥掉派生字段，否则自证会把自己判失败 |
 | **解压出的文件夹可能是旧快照** | DeepSeek 导出包是下载时刻的快照，而用户解压出来的文件夹可能来自更早的一次下载、且文件名日期与内容不一致 | 打捞前必须分别计算 **zip 内层文件** 与 **解压出的文件夹文件** 的 sha256 并比对，二者不一致时**以 zip 为准**；不要相信文件夹名，也不要相信单次 `md5sum` 的输出（本次即被误报为两者相同） |
 | **DeepSeek 聊天树不是列表** | `mapping` 是树，重新生成答案会 fork 出兄弟分支；朴素遍历 `mapping.values()` 会把两条矛盾分支拼在一起 | 从 `root` 深度优先线性化，并补捞 root 不可达的孤儿节点（脚本已实现） |
 | **DeepSeek `TOOL_OPEN`/`TOOL_FIND` 载荷未导出** | 这两类 fragment 只有 `type`，没有 `content`/`results` | 如实告知用户这是导出本身的信息损失，无法补救；不要假装"内容都在" |
