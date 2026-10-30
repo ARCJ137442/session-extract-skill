@@ -580,5 +580,113 @@ class TestIdempotentReconvert(unittest.TestCase):
                          once["messages"][1].get("reasoning"))
 
 
+# ============================================================
+# 平台探测：只看第一行会漏掉 41.5% 的真实 Claude Code 会话
+# ============================================================
+
+class TestPlatformDetection(unittest.TestCase):
+    """
+    守住坑 11：真实 Claude Code transcript 的**第一行常常不是消息**。
+
+    实测 142 个真实会话里 59 个（41.5%）首行是 last-prompt / mode /
+    ai-title / file-history-snapshot 这类旁路记录；某些 fork/rewind 旁路
+    transcript 里，第一条真正的 user/assistant 出现在**第 43 行甚至第 174 行**。
+    只看第一行 → 判成 unknown → 静默按 codex 解析 → 输出一份全 N/A 的
+    **假报告且 exit 0**。比崩溃更危险。
+    """
+
+    def _write(self, tmpdir, name, lines):
+        path = os.path.join(tmpdir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            for l in lines:
+                f.write(json.dumps(l, ensure_ascii=False) + "\n")
+        return path
+
+    def test_detects_claude_when_first_line_is_side_record(self):
+        import tempfile
+        import session_extract
+        with tempfile.TemporaryDirectory() as td:
+            lines = [{"type": "last-prompt", "sessionId": "s1", "leafUuid": "u1"},
+                     {"type": "mode", "sessionId": "s1", "mode": "default"},
+                     {"type": "permission-mode", "sessionId": "s1"}]
+            # 真正的消息出现在第 43 行
+            for i in range(40):
+                lines.append({"type": "attachment", "sessionId": "s1"})
+            lines.append({"type": "user", "sessionId": "s1", "uuid": "u2",
+                          "parentUuid": None, "message": {"role": "user"}})
+            p = self._write(td, "session.jsonl", lines)
+            self.assertEqual(session_extract.detect_platform(p), "claude")
+
+    def test_detects_claude_when_message_is_very_late(self):
+        import tempfile
+        import session_extract
+        with tempfile.TemporaryDirectory() as td:
+            lines = [{"type": "ai-title", "sessionId": "s1"}]
+            for i in range(300):
+                lines.append({"type": "queue-operation", "sessionId": "s1"})
+            lines.append({"type": "user", "sessionId": "s1", "uuid": "u2",
+                          "message": {"role": "user"}})
+            p = self._write(td, "late.jsonl", lines)
+            self.assertEqual(session_extract.detect_platform(p), "claude")
+
+    def test_detects_codex(self):
+        import tempfile
+        import session_extract
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "c.jsonl",
+                            [{"type": "session_meta", "id": "x"},
+                             {"type": "event_msg", "message": "hi"}])
+            self.assertEqual(session_extract.detect_platform(p), "codex")
+
+    def test_unknown_when_nothing_recognizable(self):
+        import tempfile
+        import session_extract
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "x.jsonl", [{"type": "whatever"}])
+            self.assertEqual(session_extract.detect_platform(p), "unknown")
+
+    def test_no_silent_fallback_to_codex(self):
+        """
+        认不出平台时**必须报错**，不能静默按 codex 解析出一份空报告。
+        """
+        import tempfile
+        import session_extract
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "x.jsonl", [{"type": "whatever"}])
+            with self.assertRaises(ValueError):
+                session_extract.extract(p, platform="unknown")
+
+
+class TestEncodingTolerance(unittest.TestCase):
+    """
+    守住坑 12：Windows 上产物可能带 BOM 或被写成 UTF-16。
+
+    - PowerShell 5.1 的 `>` 重定向写出 **UTF-16LE**（首字节 FF FE）
+    - PowerShell 管道（两个原生命令之间）注入 **UTF-8 BOM**（EF BB BF）
+    两种都必须能读回来。
+    """
+
+    def test_decode_plain_utf8(self):
+        self.assertEqual(to_openai._decode_auto("你好".encode("utf-8")), "你好")
+
+    def test_decode_utf8_bom(self):
+        self.assertEqual(to_openai._decode_auto("﻿你好".encode("utf-8")),
+                         "你好")
+
+    def test_decode_utf16(self):
+        self.assertEqual(to_openai._decode_auto("你好".encode("utf-16")),
+                         "你好")
+
+    def test_reads_bom_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "bom.json")
+            with open(p, "wb") as f:
+                f.write("﻿".encode("utf-8") + "{}".encode("utf-8"))
+            with open(p, "rb") as f:
+                self.assertEqual(to_openai._decode_auto(f.read()), "{}")
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

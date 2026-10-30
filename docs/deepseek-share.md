@@ -186,6 +186,11 @@ https://example.org/docs/paper.pdf#1#1#1
 
 ## 六、用法
 
+> ⚠️ **命令里的 `scripts/…` 是相对于 skill 目录的**。
+> 在别的目录里请用绝对路径（`[path-to-skill]/scripts/…`）——
+> 本 skill 的脚本靠**自己的目录**找同目录模块，cwd 在别处时会 import 失败。
+
+
 ### 6.1 只读模式：只有一个链接，直接把记录读出来
 
 **不需要浏览器、不需要账号导出、不需要 Cookie、不落盘。**
@@ -245,25 +250,29 @@ python scripts/verify_merged_deepseek.py --export <导出包产物.json> \
     --share <分享链接原始.json> --merged <并集产物.json> [--outdir <目录>]
 ```
 
-6 条断言（snippet 字符/条目不丢、fragment/节点不丢、逐 url snippet 未被截短、
-fragment 键全覆盖），退出码 0 = 全过、3 = 有失败，可直接当门禁用。
+7 条断言（snippet 字符/条目不丢、fragment/节点不丢、逐 url snippet 未被截短、
+fragment 键全覆盖、**同一文档不得出现多条记录**），退出码 0 = 全过、3 = 有失败，可直接当门禁用。
 详见 SKILL.md「跨源并集模式」。
 
 ## 七、附件字段约定（与导出包路径对齐）
 
+> ⚠️ **示例一律用合成值**：早期版本这里照抄过真实会话的附件对象
+> （真实 file_id 前缀、真实文件名、真实字节数、真实提问原文）——
+> 那等于把一段私人对话的片段抄进了仓库。现在全部换成占位值。
+
 ```json
 {
-  "file_id": "file-<附件 id>-...",
-  "file_name": "Screenshot_2026-10-29-02-12-02-...webp",
-  "file_size_bytes": <字节数>,
-  "node_id": "21",
-  "timestamp": "2026-10-29T02:12:39.017000+08:00",
+  "file_id": "file-<uuid>",
+  "file_name": "Screenshot_<日期时间>.webp",
+  "file_size_bytes": 0,
+  "node_id": "<节点 id>",
+  "timestamp": "<ISO 时间戳>",
   "question_it_answers": "【合成样例】这张图对应的那一问",
   "bytes_available_in_export": false,
   "bytes_available": true,
-  "local_path": "附件/Screenshot_2026-10-29-02-12-02-...webp",
-  "sha256": "<sha256 前缀>",
-  "downloaded_bytes": <字节数>,
+  "local_path": "附件/Screenshot_<日期时间>.webp",
+  "sha256": "<sha256 前 16 位>",
+  "downloaded_bytes": 0,
   "variants": [{"variant": "原图", "...": "..."}, {"variant": "缩略图", "...": "..."}]
 }
 ```

@@ -45,6 +45,7 @@ python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> 
 | 工具调用 | `response_item` 中的 `tool_use` | `assistant.message.content` 中的 `tool_use` | `TOOL_SEARCH`/`SEARCH` fragment（`TOOL_OPEN`/`TOOL_FIND` **载荷未导出**） | `TOOL_SEARCH` + `TOOL_OPEN`（**`TOOL_OPEN` 载荷完整**） |
 | 附件 | — | — | **只有元数据，字节不在包里** | **字节可直下** |
 | 快照时效 | 实时落盘 | 实时落盘 | **导出时刻的快照，可能滞后于最新会话** | 分享当时的**最终态**（中间轮次已丢失） |
+| 引用关系 | — | — | ❌ **RESPONSE 只有 content/type，没有 references[]**；被引用的 TOOL_OPEN **载荷未导出** → **原理上还原不出**「哪个标记指向哪页」 | ✅ RESPONSE 带 `references[]`（有序数组），正文 `[reference:N]` 的 N 是它的**下标** → **逐条精确** |
 
 ## 跨平台注意
 
@@ -200,6 +201,7 @@ conversations[] # id, title, inserted_at, updated_at, rescue_reason, stats, atta
 | `TOOL_OPEN` 载荷 | 未导出 | **完整** ← 独有 |
 | 标题 | 真实会话名 | 占位符「来自分享的对话」，**需 `--title` 传真实名** |
 | 轮次 | 快照时刻的状态 | **只有最终态**（用户编辑/删掉的中间轮次不在其中） |
+| 引用关系 | ❌ 没有 `references[]`，TOOL_OPEN 载荷未导出 → 还原不出 | ✅ 有 `references[]`（N 是下标），可逐条精确映射 |
 
 ```powershell
 # Windows PowerShell
@@ -378,6 +380,7 @@ python "[path-to-skill]/scripts/verify_merged_deepseek.py" --export <导出包�
 | `A4_node_union` | 并集节点集合 == 两单源节点集合的并集 |
 | `A5_per_url_snippet_preserved` | 逐条核对：两单源里每条带 snippet 的 url，在并集里仍带 snippet 且未被截短 |
 | `A6_fragment_keys_covered` | 两单源的每个 `(node_id, type, 节点内序号)` 键都在并集里 |
+| `A7_unique_document_records` | **同一篇文档不得出现多条记录**（按归一 URL 统计）：登记表无重复、与结果列表双向对齐（无孤儿/漏登）、单个 results 列表内无重复归一 URL、源侧每个变体都在并集的 `variants` 里 |
 
 退出码 **0 = 全过 / 3 = 有断言失败**，可直接当门禁用。
 同时产出 `并集vs单源-差异报告.md`（逐节点差异）与 `并集自检.json`（机器可读）。
@@ -466,7 +469,7 @@ git branch
 8. **打捞后必须自证** — 打捞完立刻跑多重集比较（`--verify`）：源 fragment 签名多重集 == 产物 transcript 多重集，且 `raw_mapping` 与源逐字相等。只比长度不算数——长度相同也可能是"丢一个重复一个"。**Why:** 静默丢数据比报错更危险，用户不会发现少了一段。
 9. **不臆造** — 目标会话不在导出里时，如实报告"不在本次导出中"，并附证据（sha256 / 命中计数 / 数据时间边界），把候选全部交给用户挑，而不是拿一个"最像的"糊弄过去。
 10. **如实报告导出格式本身的信息损失** — 缺失的载荷要指名道姓，不能含糊带过。DeepSeek 的 `TOOL_OPEN`/`TOOL_FIND` 载荷未导出、附件只有元数据没有图片本体——这些是**导出格式的固有限制**，不是 Agent 漏捞了。产出「附件清单 + 每张图对应的提问」，并明确告知用户需回客户端取图。**Why:** 用户会以为"Agent 明明看到了会话，怎么没把图给我"——含糊其辞比明说"做不到"更伤信任。
-11. **元数据 ≠ 内容，要显式区分** — 附件、版本号、文件大小这类**描述性字段**不等于内容本身。清单里用 `bytes_available` / `bytes_available_in_export` 这类布尔字段把「有描述」和「有实体」分开标，跨源比对时才不会把缺字节当成缺记录。**Why:** 一个写着 `file_size: <字节数>` 的条目很容易被当成"图片就在那儿"，而实际上那 <字节数> 字节根本不在包里。
+11. **元数据 ≠ 内容，要显式区分** — 附件、版本号、文件大小这类**描述性字段**不等于内容本身。清单里用 `bytes_available` / `bytes_available_in_export` 这类布尔字段把「有描述」和「有实体」分开标，跨源比对时才不会把缺字节当成缺记录。**Why:** 一个写着 `file_size: 12345` 的条目很容易被当成"图片就在那儿"，而实际上那 12345 字节根本不在包里。
 12. **单一来源 ≠ 完整，跨源求并集并标注出处** — 账号导出包是某时刻的快照，分享链接只有最终态，两边各有独占内容（导出包多中间轮次与上游 issue 那类线索，分享链接多附件字节与 `TOOL_OPEN` 载荷）。**并集才是完整历史**，并用 `transcript[].sources[]` / `_meta.sources[]` 标注每个节点来自哪条路径。**Why:** 任何单一来源都有它自己的盲区，不标注出处就无法判断"某段内容到底从哪来、能不能信"。
 13. **产物必须自带溯源** — 每份产物都要记下**它从哪来**：源文件路径 + sha256（或 share_id + 端点 + 响应 sha256）、抓取时间、逐项产物的来源。**Why:** 打捞产物会脱离原会话独立流传；没有溯源，三天后没人能证明它是哪一版对话、对应哪一份源数据。
 14. **归一规则只定义一次** — 「同物异形」（URL 带锚点、file_id 带前缀、标题占位符换文案）必须在**一个共享模块**里定义，提取侧与合并侧用同一把尺子。**Why:** 本 skill 已经吃过一次亏：附件 file_id 归一化了、URL 锚点没归一化，于是同一篇文章被当成多条、snippet 互相不补齐——而这类错误**不报错**，只会让数据静默变少。

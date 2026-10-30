@@ -534,8 +534,10 @@ def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node
                     "账号导出包格式不携带引用关系：RESPONSE fragment 没有 references[]，"
                     "且被引用的 TOOL_OPEN 片段（真正读过的页面）在导出包里没有载荷。"
                     "此处不猜来源——错误的来源比没有来源更糟。"
-                    "候选来源池见 candidates；需要精确映射请走跨源并集"
-                    "（分享链接路径能给出完整映射）。"
+                    "候选来源池见 candidates。"
+                    "⚠️ 需要**逐条精确**的映射，只有**纯分享链接路径**能给"
+                    "（它带 references[]）；跨源并集里导出侧正文配分享侧 references[]，"
+                    "两代下标语义不保证对齐——并集实测只有约一半能精确解析。"
                 ),
                 "candidates": pool[:25],
                 "candidate_pool_size": len(pool),
@@ -546,6 +548,26 @@ def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node
 def _now_iso():
     import datetime
     return datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).isoformat()
+
+
+def _decode_auto(data):
+    """
+    按 BOM/内容自动判断编码。
+
+    Windows 上的两个坑：
+    - **PowerShell 5.1 的 `>` 重定向**写出的文件是 **UTF-16LE**（首字节 FF FE），
+      不是 UTF-8 —— 用 utf-8 读会 "can't decode byte 0xff"。
+    - **PowerShell 管道**（原生命令之间）会按控制台编码重编码并注入
+      **UTF-8 BOM**（首字节 EF BB BF）—— 用普通 utf-8 读会 "Unexpected UTF-8 BOM"。
+
+    所以：utf-8-sig / utf-16 / utf-8 依次尝试。
+    """
+    for enc in ("utf-8-sig", "utf-16"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
 
 
 def main(argv=None):
@@ -564,13 +586,14 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     if a.product:
-        with open(a.product, encoding="utf-8") as f:
-            doc = json.load(f)
+        # ⚠️ 自动识别编码：PowerShell 的 `>` 可能写出 UTF-16LE，管道可能带 BOM
+        with open(a.product, "rb") as f:
+            doc = json.loads(_decode_auto(f.read()))
     else:
-        # ⚠️ 必须显式用 utf-8 解码：Windows 上 stdin 的默认编码是 locale
-        # （中文 = cp936），而上游产物是 UTF-8 —— 直接 sys.stdin.read()
-        # 会抛 UnicodeDecodeError（实测 'gbk' codec can't decode byte 0x80）。
-        raw = sys.stdin.buffer.read().decode("utf-8")
+        # ⚠️ 必须显式解码：Windows 上 stdin 的默认编码是 locale（中文 = cp936），
+        # 而上游产物是 UTF-8 —— 直接 sys.stdin.read() 会抛 UnicodeDecodeError
+        #（实测 'gbk' codec can't decode byte 0x80）。
+        raw = _decode_auto(sys.stdin.buffer.read())
         if not raw.strip():
             ap.error("没有输入：给一个产物文件路径，或用管道喂 stdin")
         doc = json.loads(raw)

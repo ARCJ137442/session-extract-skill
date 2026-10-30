@@ -400,9 +400,10 @@ def _attachment_key(a):
     """
     附件匹配键：file_id。
 
-    注意两条路径的 file_id 形态不同——导出包是裸 UUID（`<附件 id>-…`），
-    分享链接加了 `file-` 前缀（`file-<附件 id>-…`）。不归一化就会把同一个附件
+    注意两条路径的 file_id 形态不同——导出包是**裸 UUID**（`<uuid>`），
+    分享链接加了 `file-` 前缀（`file-<uuid>`）。不归一化就会把同一个附件
     算成两个（实测：附件数量直接翻倍）。
+    （示例一律用占位值：早期版本这里用了真实会话的 file_id 前缀。）
     """
     fid = str(a.get("file_id") or "")
     return fid[5:] if fid.startswith("file-") else fid

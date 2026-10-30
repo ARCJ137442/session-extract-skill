@@ -80,7 +80,7 @@ python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <
 
 端点与抓取细节见 [`docs/deepseek-share.md`](docs/deepseek-share.md)。
 
-## 喂给别的 LLM：ChatGPT / OpenAI 可直接用
+## 喂给别的 LLM：ChatGPT 网页版可直接上传（OpenAI 端点需 `--strict`）
 
 > **本 skill 的迭代方向：不需要写任何长脚本，就能丝滑提取会话信息。**
 > 跨工具搬运（折叠 fragment、映射引用、归一 URL 锚点、分离思考链）是**重复劳动**，
@@ -104,7 +104,9 @@ python "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <s
 ```
 
 产物形态 `chatgpt-import/v1`：`messages[]` 字段对齐 OpenAI chat messages，
-`reasoning`（思考链）单独放不混进正文，`citations` 把正文引用标记映射回来源，
+`reasoning`（思考链）单独放不混进正文，`citations` 把正文引用标记映射回来源
+（⚠️ **导出包路径的 `citations[].sources` 按设计为空**——该格式不携带引用关系，
+候选在 `candidates`；**逐条精确**的映射只有**纯分享链接路径**能给），
 `references` 按归一 URL 去重（同一文档的多个摘要收在 `variants`，不丢）。
 加 `--slim` 可产出小文件（**不再是无损产物**）。
 

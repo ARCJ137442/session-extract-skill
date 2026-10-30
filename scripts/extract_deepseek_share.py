@@ -747,6 +747,15 @@ def main(argv=None):
             reason=a.reason, title=a.title, share_id=share_id)
         meta = build_meta(raw_text, share_id, raw_messages, reason=a.reason, mode="read-only")
 
+        # 只读模式也必须**自证**：把 verify 结果写进 _meta，
+        # 让「产物没丢没重」这件事随产物一起流转，而不是靠人记得跑 --verify。
+        # ⚠️ 顺序很重要：必须**在 openai 分支之前**算好——否则旗舰路径
+        # （--format openai）的 meta.source_verification 会是 null。
+        try:
+            meta["verification"] = verify_payload(payload, doc)
+        except Exception as e:  # noqa: BLE001 — 自证失败不能盖住主产物
+            meta["verification"] = {"ok": False, "error": repr(e)}
+
         if fmt == "openai":
             # 「零长脚本」的关键一步：直接把会话变成 ChatGPT 网页版 / OpenAI
             # 兼容端点能吃的结构，不用再自己写转换器。
@@ -755,13 +764,6 @@ def main(argv=None):
                           title=a.title, slim=a.slim)
             sys.stdout.write(json.dumps(out, ensure_ascii=False, indent=2))
             return 0
-
-        # 只读模式也必须**自证**：把 verify 结果写进 _meta，
-        # 让「产物没丢没重」这件事随产物一起流转，而不是靠人记得跑 --verify。
-        try:
-            meta["verification"] = verify_payload(payload, doc)
-        except Exception as e:  # noqa: BLE001 — 自证失败不能盖住主产物
-            meta["verification"] = {"ok": False, "error": repr(e)}
 
         if fmt == "json":
             sys.stdout.write(json.dumps(

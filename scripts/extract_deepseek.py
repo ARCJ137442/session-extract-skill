@@ -465,9 +465,29 @@ def extract(filepath, ids=None, reason=None):
         ],
     }
 
+    payloads = [build_payload(c, reason) for c in picked]
+
+    # ⚠️ 每份产物都自带无损自证（分享链接路径已经这么做了）。
+    # 以前这条路径只在跑 --verify 时**打印**结果、从不写回产物 ——
+    # 于是「每份产物自带无损自证」这句话只在一种形态上成立。
+    # 这里在**落盘前**就算好（corpus 已在手，不用二次加载）。
+    per_conv = []
+    for pl in payloads:
+        try:
+            per_conv.append(verify_payload(pl, corpus))
+        except Exception as e:  # noqa: BLE001 — 自证失败不能盖住主产物
+            per_conv.append({"ok": False, "error": repr(e)})
+    meta["verification"] = {
+        "ok": all(v.get("ok") for v in per_conv),
+        "conversation_count": len(per_conv),
+        "by_conversation": {
+            str(pl.get("id")): v for pl, v in zip(payloads, per_conv)
+        },
+    }
+
     return {
         "_meta": meta,
-        "conversations": [build_payload(c, reason) for c in picked],
+        "conversations": payloads,
     }
 
 

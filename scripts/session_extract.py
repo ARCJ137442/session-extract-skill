@@ -58,13 +58,19 @@ def find_session(session_id, home=None):
     return (None, None)
 
 
-def detect_platform(filepath):
+def detect_platform(filepath, scan_lines=2000):
     """
     通过文件内容检测平台。
 
-    Codex / Claude Code 是 JSONL（一会话一行），看第一行即可；
-    DeepSeek 导出包是**单个 JSON 数组**装下全部会话（首字符是 '['），
-    或者单会话 JSON 对象（含 'mapping' 键）。
+    Codex / Claude Code 是 JSONL（一会话一行）；DeepSeek 导出包是**单个 JSON 数组**
+    装下全部会话（首字符是 '['），或者单会话 JSON 对象（含 'mapping' 键）。
+
+    ⚠️ **不能只看第一行**。实测 142 个真实 Claude Code 会话里，**59 个（41.5%）**
+    的第一行不是 `type=="user"` 的消息，而是 `last-prompt` / `mode` / `ai-title` /
+    `file-history-snapshot` 这类**旁路记录**——只看第一行会把它们判成 unknown
+    （最新的 8 个会话 8/8 全错）。
+    → 改成**扫前 N 行**（实测需要到第 43~174 行），找第一条像消息的记录；
+    扫不到再按别的特征判。
     """
     with open(filepath, "r", encoding="utf-8") as f:
         head = f.read(4096).lstrip("\ufeff \t\r\n")
@@ -84,12 +90,38 @@ def detect_platform(filepath):
         return "unknown"
     if first.get("type") == "session_meta":
         return "codex"
-    elif first.get("type") == "user" and "sessionId" in first:
-        return "claude"
-    elif "mapping" in first:
+    if "mapping" in first:
         return "deepseek"
-    return "unknown"
 
+    # —— 第一行不是消息时，往后扫若干行 ——
+    # Claude Code 的消息行特征：type 是 user/assistant，且带 sessionId / uuid / parentUuid
+    # ⚠️ 扫描窗口要够大：实测某些 fork/rewind 旁路 transcript 里，第一条真正的
+    # user/assistant 出现在**第 43 行甚至第 174 行**（前面全是
+    # last-prompt / mode / permission-mode / attachment 这类旁路记录）。
+    with open(filepath, "r", encoding="utf-8") as f:
+        f.seek(0)
+        for _ in range(scan_lines):
+            line = f.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            rtype = rec.get("type")
+            if rtype in ("user", "assistant") and (
+                    "sessionId" in rec or "uuid" in rec or "parentUuid" in rec):
+                return "claude"
+            if rtype == "session_meta":
+                return "codex"
+            if "mapping" in rec:
+                return "deepseek"
+    return "unknown"
 
 def extract(filepath, platform=None):
     """根据平台分派到对应提取器。"""
@@ -103,8 +135,14 @@ def extract(filepath, platform=None):
     elif platform == "deepseek":
         return extract_deepseek.extract(filepath)
     else:
-        print("WARNING: Unknown platform, trying codex")
-        return extract_codex(filepath)
+        # ⚠️ 不再静默降级成 codex。旧代码在这里打一条 WARNING 就按 codex 解析，
+        # 用户会拿到一份**全是 N/A 的假报告**而且 exit 0 —— 比崩溃更伤信任。
+        raise ValueError(
+            "无法识别会话格式（platform=unknown）。"
+            "请用 --platform 显式指定：codex / claude / deepseek。"
+            "（若这是 Claude Code 会话，常见原因是文件头几行是旁路记录，"
+            "现在会自动往后扫 40 行，但仍认不出时请手动指定。）"
+        )
 
 
 # ============================================================
@@ -334,6 +372,14 @@ def _write_json(path, obj):
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
+def _openai_variant_path(out_path):
+    """openai 形态产物的文件名：避免出现 export.openai.openai.json 这种双后缀。"""
+    stem = os.path.splitext(out_path)[0]
+    if stem.endswith(".openai"):
+        return stem + ".chatgpt.json"
+    return stem + ".openai.json"
+
+
 def _write_openai_variant(meta, convs, path, title=None):
     """
     额外写一份「ChatGPT / OpenAI 可直接用」的产物。
@@ -422,7 +468,7 @@ def run_deepseek_share_extract(share, title, out, outdir, reason, markdown, veri
         if as_shape == "openai":
             _write_openai_variant(
                 meta, convs,
-                os.path.splitext(out_path)[0] + ".openai.json",
+                _openai_variant_path(out_path),
                 title=title)
 
     print_deepseek_summary(result)
@@ -748,8 +794,12 @@ def main():
                                       markdown, verify, as_shape=as_shape))
 
     if platform == "unknown":
-        print("WARNING: Could not detect platform, defaulting to 'codex'")
-        platform = "codex"
+        # ⚠️ 同样不再静默降级：一份「全是 N/A」的报告 + exit 0 是最坏的结果。
+        # 明确报错，并告诉用户怎么指定。
+        print("ERROR: Could not detect platform from file content.")
+        print("  用 --platform 显式指定：codex / claude / deepseek")
+        print("  例：python session_extract.py --platform claude " + filepath)
+        sys.exit(1)
 
     size_mb = os.path.getsize(filepath) / (1024 * 1024)
     if size_mb > 10:
