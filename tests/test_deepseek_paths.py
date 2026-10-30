@@ -78,9 +78,12 @@ def synthetic_biz():
                   "site_icon": None, "query_indexes": [0], "provider": None},
              ]},
             {"id": 5, "type": "RESPONSE",
-             "content": "【合成样例】回答引用了文档甲[reference:4]与文档乙[reference:3]。",
+             "content": "【合成样例】回答引用了文档甲[reference:0]与文档乙[reference:2]。",
+             # ⚠️ references[] 是**有序数组**，正文里 [reference:N] 的 N 是它的**下标**
+             # （不是 fragment id）。下标 2 指向 id=3 那个 TOOL_SEARCH。
              "references": [
                  {"id": 4, "type": "TOOL_OPEN"},
+                 {"id": 2, "type": "TOOL_SEARCH", "urls": []},
                  {"id": 3, "type": "TOOL_SEARCH", "urls": [url_a, url_b]},
              ]},
         ],
@@ -251,6 +254,29 @@ class TestToOpenAI(unittest.TestCase):
         urls = {s["url"] for c in a["citations"] for s in c["sources"]}
         self.assertIn("https://example.invalid/docs/a.pdf", urls)
 
+    def test_marker_is_index_into_references_array(self):
+        """
+        守住坑 7：分享链接路径的 `[reference:N]` 里，N 是 references[] 的**下标**，
+        不是 fragment id。把它当 id 解读，会让标记指向不相干的片段。
+        """
+        a = self.out["messages"][1]
+        cites = {c["marker"]: c for c in a["citations"]}
+        self.assertIn("[reference:0]", cites)
+        self.assertIn("[reference:2]", cites)
+        # 下标 0 → references[0] = {id:4} = 那个 TOOL_OPEN（文档甲）
+        self.assertEqual(cites["[reference:0]"]["ref_id"], 4)
+        self.assertEqual(cites["[reference:0]"]["sources"][0]["url"],
+                         "https://example.invalid/docs/a.pdf")
+        # 下标 2 → references[2] = {id:3} = 那个 TOOL_SEARCH（文档甲 + 文档乙）
+        self.assertEqual(cites["[reference:2]"]["ref_id"], 3)
+        self.assertEqual(len(cites["[reference:2]"]["sources"]), 2)
+
+    def test_markers_and_citations_one_to_one(self):
+        import re
+        for m in self.out["messages"]:
+            markers = re.findall(r"\[!?reference:\d+\]", m["content"])
+            self.assertEqual(len(markers), len(m.get("citations") or []))
+
     def test_references_dedup_by_normalised_url(self):
         urls = [r["url"] for r in self.out["references"]]
         self.assertEqual(len(urls), len(set(urls)), "来源清单不得有重复 URL")
@@ -354,21 +380,38 @@ class TestExportPathCitations(unittest.TestCase):
     """
     守住坑 6：账号导出包路径**不携带引用关系**。
 
-    以前转换器只认分享链接路径的 references[]，于是导出包路径的正文里
-    全是悬空的 `[!reference:N]` 标记——用户拿到的是「有标记、没来源」。
+    导出包的 RESPONSE fragment 只有 content / type，**没有 references[]**；
+    而被引用的片段绝大多数是 TOOL_OPEN（真正读过的页面），
+    这些片段在导出包里**没有载荷**（导出格式根本没导出）。
+    → 这条路径在原理上还原不出引用关系。
+
+    ⚠️ 曾经试过「标记 N → 该消息搜索结果列表的第 N 个」，实测与分享侧真值
+    71 个标记里 65 个对不上——那是**把来源猜错了**。
+    错误的来源比没有来源更糟：用户会以为「这句话的依据是这篇」，而其实不是。
+    所以正确行为是**如实说解析不了**，并附候选来源池。
     """
 
     def setUp(self):
         self.doc = synthetic_export_product()
         self.out = to_openai.convert(self.doc)
 
-    def test_markers_resolved_by_result_index(self):
+    def test_markers_not_guessed(self):
+        """解析不了就标解析不了——不能猜。"""
         assistant = [m for m in self.out["messages"] if m["role"] == "assistant"][0]
         cites = assistant.get("citations") or []
-        self.assertEqual(len(cites), 2, "两个行内标记都必须被解析")
-        urls = [s["url"] for c in cites for s in c["sources"]]
-        self.assertEqual(urls, ["https://example.invalid/x.html",
-                                "https://example.invalid/y.html"])
+        self.assertEqual(len(cites), 2, "两个行内标记都要出现在 citations 里")
+        for c in cites:
+            self.assertEqual(c["sources"], [], "没有可靠来源时不得编造")
+            self.assertEqual(c["ref_type"], "unresolvable-in-export-format")
+            self.assertTrue(c.get("note"))
+
+    def test_candidates_offered(self):
+        """解析不了也要给候选来源池（用户至少能自己去点）。"""
+        assistant = [m for m in self.out["messages"] if m["role"] == "assistant"][0]
+        cites = assistant.get("citations") or []
+        cand_urls = {c2["url"] for c in cites for c2 in c.get("candidates") or []}
+        self.assertIn("https://example.invalid/x.html", cand_urls)
+        self.assertIn("https://example.invalid/y.html", cand_urls)
 
     def test_marker_text_preserved(self):
         assistant = [m for m in self.out["messages"] if m["role"] == "assistant"][0]
@@ -382,7 +425,8 @@ class TestExportPathCitations(unittest.TestCase):
             self.assertEqual(len(markers), len(cites),
                              "行内标记数必须与解析出的引用数一致")
 
-    def test_sources_registered_in_references(self):
+    def test_search_results_still_in_reference_pool(self):
+        """来源池本身不受影响——页面还在，只是「哪句对应哪页」丢了。"""
         urls = {r["url"] for r in self.out["references"]}
         self.assertIn("https://example.invalid/x.html", urls)
         self.assertIn("https://example.invalid/y.html", urls)

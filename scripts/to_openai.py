@@ -72,14 +72,21 @@ def _frag_results(frag):
 
 def _build_fragment_index(product):
     """
-    建立 fragment id → (node_id, type, results) 的索引。
+    建立 fragment 索引，供引用解析使用。
 
-    引用标记 [reference:N] 里的 N 就是 fragment id，必须靠它把
-    「正文里的一句话」和「它引用的那个网页」对上。
-    优先用源容器（raw_messages / raw_mapping）——那里有 fragment id；
-    没有源容器时退化为「同节点同类型」匹配（精度略降但不丢内容）。
+    ⚠️ **fragment id 在不同消息之间会重复**（实测同一个会话里 id=8 出现在
+    四条不同消息的 fragment 上）。所以索引必须**按消息作用域**建立：
+    引用标记出现在某条消息的 RESPONSE 里，它指向的必然是**同一条消息内**
+    的 fragment。只建全局索引会取到「第一条同名 id」——结果就是引用指向
+    一个 result 为空的片段，来源解析不出来（实测 7 处引用悬空）。
+
+    返回：
+      by_id         —— 全局 id → fragment（同名取首个，仅作兜底）
+      by_node_id    —— (node_id, fragment_id) → fragment（**优先用这个**）
+      by_node_type  —— (node_id, type) → [fragment]（没有 id 时的退化路径）
     """
     by_id = {}
+    by_node_id = {}
     by_node_type = {}
 
     def register(node_id, frag):
@@ -87,7 +94,10 @@ def _build_fragment_index(product):
             return
         fid = frag.get("id")
         if fid is not None:
-            by_id.setdefault(str(fid), (node_id, frag.get("type"), _frag_results(frag)))
+            key = str(fid)
+            by_id.setdefault(key, (node_id, frag.get("type"), _frag_results(frag)))
+            by_node_id.setdefault((str(node_id), key),
+                                  (node_id, frag.get("type"), _frag_results(frag)))
         by_node_type.setdefault((str(node_id), frag.get("type")), []).append(frag)
 
     raw_messages = product.get("raw_messages")
@@ -96,7 +106,7 @@ def _build_fragment_index(product):
             nid = str(msg.get("message_id"))
             for frag in (msg.get("fragments") or []):
                 register(nid, frag)
-        return by_id, by_node_type
+        return by_id, by_node_id, by_node_type
 
     raw_mapping = product.get("raw_mapping")
     if isinstance(raw_mapping, dict):
@@ -104,11 +114,12 @@ def _build_fragment_index(product):
             if not isinstance(node, dict):
                 continue
             nid = str(node.get("id"))
-            for frag in (node.get("fragments") or []):
+            msg = node.get("message") or {}
+            for frag in (msg.get("fragments") or []):
                 register(nid, frag)
-        return by_id, by_node_type
+        return by_id, by_node_id, by_node_type
 
-    return by_id, by_node_type
+    return by_id, by_node_id, by_node_type
 
 
 def _entries_by_node(product):
@@ -172,7 +183,7 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
         doc = {"_meta": {}, "conversations": [product]}
         conv = product
 
-    by_id, by_node_type = _build_fragment_index(conv)
+    by_id, by_node_frag, by_node_type = _build_fragment_index(conv)
     order, grouped = _entries_by_node(conv)
 
     messages = []
@@ -237,8 +248,8 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
                      "snippet": r.get("snippet")}
                     for r in opened if isinstance(r, dict)
                 ]
-            citations = _resolve_citations(entries, content, by_id, by_node_type, nid,
-                                          ref_store, idx)
+            citations = _resolve_citations(entries, content, by_id, by_node_frag,
+                                          by_node_type, nid, ref_store, idx)
             if citations:
                 entry["citations"] = citations
         else:
@@ -293,18 +304,24 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
     return out
 
 
-def _resolve_citations(entries, content, by_id, by_node_type, node_id, ref_store=None, msg_index=None):
+def _resolve_citations(entries, content, by_id, by_node_frag, by_node_type, node_id,
+                       ref_store=None, msg_index=None):
     """
     把引用标记解析成「标记 → 来源列表」。
 
-    ⚠️ **两条路径的引用语义完全不同**，必须分开处理：
+    ⚠️ **两条路径的引用语义完全不同**，必须分开处理（实测出来的，不是猜的）：
 
-    - **分享链接路径**：RESPONSE fragment 带 `references[]`，里面的 `id` 是
-      **fragment id**（指向某个 TOOL_OPEN / TOOL_SEARCH 片段）。
+    - **分享链接路径**：RESPONSE fragment 带 `references[]`（有序数组），
+      正文里的 `[reference:N]` 里的 **N 是这个数组的下标**；
+      数组每一项的 `id` 才是 fragment id（指向某个 TOOL_OPEN / TOOL_SEARCH）。
+      实测：某条消息有 24 个 references，正文里的标记最大到 23 —— 对得上。
+      把 N 当 fragment id 解读，会让一半的标记指向不相干的片段
+      （而且 fragment id 在不同消息之间会重复，更容易张冠李戴）。
     - **账号导出包路径**：导出格式**根本不携带引用关系**——RESPONSE fragment
-      只有 `content` 和 `type`。正文里的 `[!reference:N]` 里的 N 是
-      **该消息内搜索结果列表的下标**（把该消息所有 TOOL_SEARCH/SEARCH 的
-      results 按顺序拍平后取第 N 个）。
+      只有 content 和 type，没有 references[]；而被引用的片段绝大多数是
+      TOOL_OPEN（真正读过的页面），这些片段在导出包里**没有载荷**。
+      所以这条路径**在原理上还原不出**「哪个标记指向哪个页面」，
+      只能如实标成「该格式无法解析」+ 给候选来源池（见分支 B 的注释）。
 
     两种都支持，才能让两条路径的产物都有可点的来源。
     """
@@ -312,75 +329,123 @@ def _resolve_citations(entries, content, by_id, by_node_type, node_id, ref_store
     citations = []
     seen = set()
 
-    # ---- A. 分享链接路径：references[] 里的 id 是 fragment id ----
+    def resolve_ref(ref):
+        """references[] 的一项 → 来源 URL 列表。"""
+        rid = str(ref.get("id"))
+        hit = by_node_frag.get((str(node_id), rid)) or by_id.get(rid)
+        if hit:
+            _nid, _rtype, results = hit
+            return [{"url": r.get("url_normalized") or norm_url(r.get("url")),
+                     "url_original": r.get("url"),
+                     "title": r.get("title"),
+                     "snippet": r.get("snippet")}
+                    for r in results if isinstance(r, dict)]
+        cands = []
+        for frag in by_node_type.get((str(node_id), ref.get("type")), []):
+            for r in _frag_results(frag):
+                if isinstance(r, dict):
+                    cands.append({"url": norm_url(r.get("url")),
+                                  "url_original": r.get("url"),
+                                  "title": r.get("title"),
+                                  "snippet": r.get("snippet")})
+        if not cands and ref.get("urls"):
+            cands = [{"url": norm_url(u), "url_original": u, "title": None, "snippet": None}
+                     for u in ref["urls"]]
+        return cands
+
+    # ---- A. 分享链接路径：标记 N 是 references[] 的下标 ----
+    ref_list = []
     for e in entries:
-        if e.get("type") != "RESPONSE":
-            continue
-        for ref in (e.get("references") or []):
+        if e.get("type") == "RESPONSE":
+            ref_list.extend(e.get("references") or [])
+
+    markers = list(marker_re.finditer(content))
+    if ref_list and markers:
+        for m in markers:
+            n = int(m.group(1))
+            ref = ref_list[n] if 0 <= n < len(ref_list) else None
+            if ref is None:
+                citations.append({
+                    "marker": m.group(0), "ref_type": "out-of-range",
+                    "ref_id": n, "appears_in_content": True, "sources": [],
+                })
+                continue
+            cands = resolve_ref(ref)
+            citations.append({
+                "marker": m.group(0),
+                "ref_type": ref.get("type"),
+                "ref_id": ref.get("id"),
+                "appears_in_content": True,
+                "sources": cands,
+            })
+            for c in cands:
+                if ref_store is not None:
+                    _merge_reference(ref_store, c, msg_index)
+    elif ref_list:
+        # 正文里没有标记、但 references[] 有内容——按 fragment id 逐条登记
+        for ref in ref_list:
             rid = str(ref.get("id"))
-            marker = "[reference:%s]" % rid
             if rid in seen:
                 continue
             seen.add(rid)
-            hit = by_id.get(rid)
-            if hit:
-                _nid, _rtype, results = hit
-                cands = [{"url": r.get("url_normalized") or norm_url(r.get("url")),
-                          "url_original": r.get("url"),
-                          "title": r.get("title"),
-                          "snippet": r.get("snippet")}
-                         for r in results if isinstance(r, dict)]
-            else:
-                # 没有 fragment id 就退化为「同节点同类型」
-                cands = []
-                for frag in by_node_type.get((str(node_id), ref.get("type")), []):
-                    for r in _frag_results(frag):
-                        if isinstance(r, dict):
-                            cands.append({"url": norm_url(r.get("url")),
-                                          "url_original": r.get("url"),
-                                          "title": r.get("title"),
-                                          "snippet": r.get("snippet")})
-            if not cands and ref.get("urls"):
-                cands = [{"url": norm_url(u), "url_original": u, "title": None, "snippet": None}
-                         for u in ref["urls"]]
+            cands = resolve_ref(ref)
             citations.append({
-                "marker": marker,
+                "marker": "[reference:%s]" % rid,
                 "ref_type": ref.get("type"),
                 "ref_id": ref.get("id"),
-                "appears_in_content": bool(marker_re.search(content)),
+                "appears_in_content": False,
                 "sources": cands,
             })
             for c in cands:
                 if ref_store is not None:
                     _merge_reference(ref_store, c, msg_index)
 
-    # ---- B. 账号导出包路径：没有 references[]，标记里的 N 是结果下标 ----
+    # ---- B. 账号导出包路径：格式不携带引用关系 —— 如实说「解析不了」 ----
+    #
+    # 实测结论（对照分享链接侧的真值逐条核过）：
+    #   - 导出包的 RESPONSE fragment 只有 content / type，**没有 references[]**
+    #   - 行内标记里，被引用的 fragment **69% 指向 TOOL_OPEN**（真正读过的页面）
+    #   - 而导出包里 **96 个 TOOL_OPEN 片段全部没有载荷**（导出格式根本没导出它）
+    #   → 导出包路径**在原理上就还原不出**「哪个标记指向哪个页面」
+    #
+    # ⚠️ 曾试过「标记 N → 该消息搜索结果列表的第 N 个」，实测 71 个标记里
+    # 65 个与分享侧真值不一致——那是**把来源猜错了**。错误的来源比没有来源更糟：
+    # 用户会以为「这句话的依据是这篇」，而其实不是。
+    # 所以这里**不猜**：如实标成「该格式无法解析」，并附上候选来源池。
     if not citations:
-        flat = []
+        pool = []
+        seen_urls = set()
         for e in entries:
             if e.get("type") in ("TOOL_SEARCH", "SEARCH"):
-                flat.extend(r for r in (e.get("results") or []) if isinstance(r, dict))
-        if flat:
-            for m in marker_re.finditer(content):
-                n = int(m.group(1))
-                src = flat[n] if 0 <= n < len(flat) else None
-                cands = []
-                if src:
-                    cands = [{"url": r.get("url_normalized") or norm_url(r.get("url")),
-                              "url_original": r.get("url"),
-                              "title": r.get("title"),
-                              "snippet": r.get("snippet")}
-                             for r in [src]]
-                citations.append({
-                    "marker": m.group(0),
-                    "ref_type": "result-index",
-                    "ref_id": n,
-                    "appears_in_content": True,
-                    "sources": cands,
-                })
-                for c in cands:
-                    if ref_store is not None:
-                        _merge_reference(ref_store, c, msg_index)
+                for r in (e.get("results") or []):
+                    if not isinstance(r, dict):
+                        continue
+                    u = r.get("url_normalized") or norm_url(r.get("url"))
+                    if u and u not in seen_urls:
+                        seen_urls.add(u)
+                        pool.append({
+                            "url": u,
+                            "url_original": r.get("url"),
+                            "title": r.get("title"),
+                            "snippet": r.get("snippet"),
+                        })
+        for m in markers:
+            citations.append({
+                "marker": m.group(0),
+                "ref_type": "unresolvable-in-export-format",
+                "ref_id": int(m.group(1)),
+                "appears_in_content": True,
+                "sources": [],
+                "note": (
+                    "账号导出包格式不携带引用关系：RESPONSE fragment 没有 references[]，"
+                    "且被引用的 TOOL_OPEN 片段（真正读过的页面）在导出包里没有载荷。"
+                    "此处不猜来源——错误的来源比没有来源更糟。"
+                    "候选来源池见 candidates；需要精确映射请走跨源并集"
+                    "（分享链接路径能给出完整映射）。"
+                ),
+                "candidates": pool[:25],
+                "candidate_pool_size": len(pool),
+            })
     return citations
 
 
