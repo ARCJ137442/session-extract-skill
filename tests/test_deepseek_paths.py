@@ -291,5 +291,105 @@ class TestToOpenAI(unittest.TestCase):
         self.assertEqual(self.out["messages"][1]["content"], rsps[0])
 
 
+# ============================================================
+# 账号导出包路径：引用语义完全不同
+# ============================================================
+
+def synthetic_export_product():
+    """
+    账号导出包路径的形状：**不携带引用关系**。
+
+    - RESPONSE fragment 只有 content / type，**没有 references[]**
+    - 正文里的 `[!reference:N]` 里，N 是**该消息搜索结果列表的下标**
+      （把该消息所有 TOOL_SEARCH/SEARCH 的 results 按顺序拍平后取第 N 个）
+    """
+    url_x = "https://example.invalid/x.html"
+    url_y = "https://example.invalid/y.html"
+    msg = {
+        "id": "1", "message_id": 1,
+        "message": {
+            "inserted_at": 1700000000, "model": "",
+            "fragments": [
+                {"type": "REQUEST", "content": "【合成样例】导出包路径的问题"},
+                {"type": "TOOL_SEARCH",
+                 "queries": [{"query": "合成样例导出包查询词"}],
+                 "results": [
+                     {"url": url_x, "title": "【合成样例】X"},
+                     {"url": url_y, "title": "【合成样例】Y"},
+                 ]},
+                {"type": "RESPONSE",
+                 "content": "【合成样例】答案引用了X[!reference:0]与Y[!reference:1]。"},
+            ],
+        },
+    }
+    transcript = [
+        {"seq": 0, "node_id": "1", "depth": 0, "type": "REQUEST", "role": "user",
+         "label": "用户提问", "model": "", "timestamp": None, "sources": ["export"],
+         "content": "【合成样例】导出包路径的问题"},
+        {"seq": 1, "node_id": "1", "depth": 0, "type": "TOOL_SEARCH", "role": "tool",
+         "label": "联网搜索", "model": "", "timestamp": None, "sources": ["export"],
+         "queries": [{"query": "合成样例导出包查询词"}],
+         "results": [
+             {"url": url_x, "title": "【合成样例】X",
+              "url_normalized": url_x, "url_anchor": None},
+             {"url": url_y, "title": "【合成样例】Y",
+              "url_normalized": url_y, "url_anchor": None},
+         ]},
+        {"seq": 2, "node_id": "1", "depth": 0, "type": "RESPONSE", "role": "assistant",
+         "label": "模型回答", "model": "", "timestamp": None, "sources": ["export"],
+         "content": "【合成样例】答案引用了X[!reference:0]与Y[!reference:1]。"},
+    ]
+    conv = {
+        "id": "synthetic", "title": "【合成样例】导出包路径会话",
+        "title_is_placeholder": False, "title_source": "export",
+        "stats": {}, "attachments": [],
+        "transcript": transcript,
+        "raw_mapping": {"1": msg},
+    }
+    return {"_meta": {"schema": "rescued-session/v1", "platform": "deepseek-web-export"},
+            "conversations": [conv]}
+
+
+class TestExportPathCitations(unittest.TestCase):
+    """
+    守住坑 6：账号导出包路径**不携带引用关系**。
+
+    以前转换器只认分享链接路径的 references[]，于是导出包路径的正文里
+    全是悬空的 `[!reference:N]` 标记——用户拿到的是「有标记、没来源」。
+    """
+
+    def setUp(self):
+        self.doc = synthetic_export_product()
+        self.out = to_openai.convert(self.doc)
+
+    def test_markers_resolved_by_result_index(self):
+        assistant = [m for m in self.out["messages"] if m["role"] == "assistant"][0]
+        cites = assistant.get("citations") or []
+        self.assertEqual(len(cites), 2, "两个行内标记都必须被解析")
+        urls = [s["url"] for c in cites for s in c["sources"]]
+        self.assertEqual(urls, ["https://example.invalid/x.html",
+                                "https://example.invalid/y.html"])
+
+    def test_marker_text_preserved(self):
+        assistant = [m for m in self.out["messages"] if m["role"] == "assistant"][0]
+        self.assertEqual(assistant["citations"][0]["marker"], "[!reference:0]")
+
+    def test_every_inline_marker_has_a_citation(self):
+        import re
+        for m in self.out["messages"]:
+            markers = re.findall(r"\[!?reference:\d+\]", m["content"])
+            cites = m.get("citations") or []
+            self.assertEqual(len(markers), len(cites),
+                             "行内标记数必须与解析出的引用数一致")
+
+    def test_sources_registered_in_references(self):
+        urls = {r["url"] for r in self.out["references"]}
+        self.assertIn("https://example.invalid/x.html", urls)
+        self.assertIn("https://example.invalid/y.html", urls)
+
+    def test_raw_mapping_preserved(self):
+        self.assertIn("raw_mapping", self.out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -294,10 +294,25 @@ def convert(product, title=None, note=None, slim=False, source_meta=None):
 
 
 def _resolve_citations(entries, content, by_id, by_node_type, node_id, ref_store=None, msg_index=None):
-    """把 RESPONSE 的 references[] 解析成「标记 → 来源列表」。"""
+    """
+    把引用标记解析成「标记 → 来源列表」。
+
+    ⚠️ **两条路径的引用语义完全不同**，必须分开处理：
+
+    - **分享链接路径**：RESPONSE fragment 带 `references[]`，里面的 `id` 是
+      **fragment id**（指向某个 TOOL_OPEN / TOOL_SEARCH 片段）。
+    - **账号导出包路径**：导出格式**根本不携带引用关系**——RESPONSE fragment
+      只有 `content` 和 `type`。正文里的 `[!reference:N]` 里的 N 是
+      **该消息内搜索结果列表的下标**（把该消息所有 TOOL_SEARCH/SEARCH 的
+      results 按顺序拍平后取第 N 个）。
+
+    两种都支持，才能让两条路径的产物都有可点的来源。
+    """
     marker_re = _ref_marker_re()
     citations = []
     seen = set()
+
+    # ---- A. 分享链接路径：references[] 里的 id 是 fragment id ----
     for e in entries:
         if e.get("type") != "RESPONSE":
             continue
@@ -338,6 +353,34 @@ def _resolve_citations(entries, content, by_id, by_node_type, node_id, ref_store
             for c in cands:
                 if ref_store is not None:
                     _merge_reference(ref_store, c, msg_index)
+
+    # ---- B. 账号导出包路径：没有 references[]，标记里的 N 是结果下标 ----
+    if not citations:
+        flat = []
+        for e in entries:
+            if e.get("type") in ("TOOL_SEARCH", "SEARCH"):
+                flat.extend(r for r in (e.get("results") or []) if isinstance(r, dict))
+        if flat:
+            for m in marker_re.finditer(content):
+                n = int(m.group(1))
+                src = flat[n] if 0 <= n < len(flat) else None
+                cands = []
+                if src:
+                    cands = [{"url": r.get("url_normalized") or norm_url(r.get("url")),
+                              "url_original": r.get("url"),
+                              "title": r.get("title"),
+                              "snippet": r.get("snippet")}
+                             for r in [src]]
+                citations.append({
+                    "marker": m.group(0),
+                    "ref_type": "result-index",
+                    "ref_id": n,
+                    "appears_in_content": True,
+                    "sources": cands,
+                })
+                for c in cands:
+                    if ref_store is not None:
+                        _merge_reference(ref_store, c, msg_index)
     return citations
 
 
