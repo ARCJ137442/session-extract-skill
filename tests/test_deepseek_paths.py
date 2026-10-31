@@ -687,6 +687,73 @@ class TestEncodingTolerance(unittest.TestCase):
                 self.assertEqual(to_openai._decode_auto(f.read()), "{}")
 
 
+class TestDesensitizeScanner(unittest.TestCase):
+    """
+    守住坑 13：脱敏不能只靠字面量扫描。
+
+    前两轮只按字面量扫（路径 / 分享 id / 标题），**漏掉了「照抄真实对象
+    当示例」这一类**——真实会话的用户提问原文、真实附件的 file_id 与字节数
+    都曾留在文档里。字面量扫描抓不到，只有 n-gram 比对能抓到。
+    """
+
+    def setUp(self):
+        import desensitize_scan
+        self.scan = desensitize_scan
+
+    def _corpus_with(self, sentence):
+        """构造一份合成的「导出包」语料。"""
+        import tempfile
+        td = tempfile.mkdtemp(prefix="ds_scan_test_")
+        doc = [{
+            "id": "c1", "title": "t",
+            "mapping": {"root": {"id": "root", "message": {"fragments": [
+                {"type": "REQUEST", "content": sentence},
+            ]}}},
+        }]
+        p = os.path.join(td, "corpus.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(doc, f, ensure_ascii=False)
+        return p
+
+    def test_extracts_only_conversation_content(self):
+        """只取 REQUEST/RESPONSE 正文，不把元数据当语料。"""
+        p = self._corpus_with("【合成样例】这是一句足够长的自然语言提问内容用于测试。")
+        texts = self.scan.load_corpus_texts([p])
+        self.assertEqual(len(texts), 1)
+        self.assertIn("自然语言提问", texts[0])
+
+    def test_prose_filter_drops_code(self):
+        """代码片段不当探针——它在仓库源码里必然命中，会淹没真泄漏。"""
+        code = "def foo(x):\n    try:\n        return x + 1\n    except Exception as e:\n        raise ValueError(e)\n"
+        p = self._corpus_with(code)
+        texts = self.scan.load_corpus_texts([p])
+        self.assertEqual(texts, [], "纯代码不该被当成散文探针")
+
+    def test_ngram_finds_planted_leak(self):
+        """把一段真实语料「抄」进 blob，n-gram 扫描必须抓到。"""
+        sentence = "【合成样例】这句话必须被扫描器发现因为它像一句真话"
+        p = self._corpus_with(sentence)
+        texts = self.scan.load_corpus_texts([p])
+        blobs = [("deadbeef", "前言\n这里抄了：" + sentence + "\n后记")]
+        hits, probes = self.scan.ngram_scan(blobs, texts, 20, 10)
+        self.assertGreater(probes, 0)
+        self.assertTrue(hits, "抄进去的真实语料必须被抓到")
+
+    def test_ngram_clean_when_absent(self):
+        p = self._corpus_with("【合成样例】这段话不会出现在任何 blob 里所以不该命中。")
+        texts = self.scan.load_corpus_texts([p])
+        blobs = [("deadbeef", "完全无关的内容")]
+        hits, _probes = self.scan.ngram_scan(blobs, texts, 20, 10)
+        self.assertFalse(hits)
+
+    def test_share_link_pattern_only_matches_real_ids(self):
+        """格式说明 `/share/<id>` 合法；`/share/<真实id>` 才该报。"""
+        self.assertIsNone(self.scan.SHARE_LINK_RE.search("https://chat.deepseek.com/share/<18位ID>"))
+        self.assertIsNone(self.scan.SHARE_LINK_RE.search("https://chat.deepseek.com/share/<id>"))
+        self.assertIsNotNone(self.scan.SHARE_LINK_RE.search(
+            "https://chat.deepseek.com/share/<分享 id>"))
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

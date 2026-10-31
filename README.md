@@ -143,6 +143,7 @@ python "[path-to-skill]/scripts/session_extract.py" --merge <导出包产物.jso
 | `scripts/verify_merged_deepseek.py` | 并集门禁自检：片段不丢、snippet 不丢、节点集合、逐文档 snippet 未被截短、同文档不重复 |
 | `scripts/deepseek_common.py` | 两条路径**共用**的归一规则：占位符标题识别、URL 锚点归一、派生字段剥离 |
 | `scripts/to_openai.py` | 产物 → ChatGPT 可用结构（messages 数组 + 引用映射 + 来源清单）；`--strict` 输出只含 `role`/`content` 的严格数组 |
+| `scripts/desensitize_scan.py` | 脱敏扫描器：字面量 + **n-gram 探针**（拿真实语料的对话正文切成 20 字窗口，逐个在所有 blob 里找）。**字面量扫描抓不到「照抄真实正文当示例」这一类** |
 | `tests/test_deepseek_paths.py` | 回归测试（stdlib unittest，**合成数据**，不引第三方依赖） |
 
 ## 注意事项
