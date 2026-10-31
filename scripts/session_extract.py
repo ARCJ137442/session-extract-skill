@@ -791,6 +791,22 @@ def main():
         except ValueError as e:
             print(f"ERROR: {e}")
             sys.exit(1)
+    else:
+        # ⚠️ **显式 --platform 也要有护栏**。
+        # 以前只有自动探测路径有「认不出就报错」的护栏；用户显式指定时
+        # 护栏**永不触发** → 拿 Claude 会话去按 codex 解析 → 得到一份
+        # **全是 N/A 的假报告**而且 exit 0（实测三平台 × 三格式矩阵：
+        # 只有 deepseek 因为解析器抛异常才偶然 exit 1）。
+        # → 显式指定时与探测结果**交叉校验**，不一致就报错退出。
+        try:
+            detected = detect_platform(filepath)
+        except ValueError:
+            detected = "unknown"
+        if detected != "unknown" and detected != platform:
+            print("ERROR: --platform {} 与文件实际格式（{}）不一致".format(
+                platform, detected))
+            print("  去掉 --platform 让脚本自动探测，或改成 --platform {}".format(detected))
+            sys.exit(1)
 
     # --- DeepSeek 分支：打捞成独立 JSON ---
     if platform == "deepseek":
@@ -811,6 +827,15 @@ def main():
         print()
 
     result = extract(filepath, platform)
+
+    # ⚠️ **什么都没解析出来 = 报错**，不是「一份全 0 的报告 + exit 0」。
+    # 用户看到 exit 0 会以为「这个会话就这么短」——而真实情况是**格式不对**。
+    if not (result.get("user_msgs") or result.get("agent_texts")
+            or result.get("total_user_msgs") or result.get("total_agent_msgs")):
+        print("ERROR: 从这个文件里**没有解析出任何会话内容**。")
+        print("  可能原因：文件格式与 --platform {} 不符，或该文件不是会话记录。".format(platform))
+        print("  去掉 --platform 让脚本自动探测试试。")
+        sys.exit(1)
 
     if as_json:
         # ⚠️ 以前 --json 只在 --scan 路径被消费，Claude/Codex 路径**完全无视**它

@@ -65,6 +65,14 @@ LITERAL_PATTERNS = [
 # 真实分享链接形态（文档里应用 <id> 占位代替）
 SHARE_LINK_RE = re.compile(r'chat\.deepseek\.com/share/([A-Za-z0-9_-]{16,})')
 
+# ⚠️ **裸分享 id**：本 skill 的产物里 `share_id` 就是一个**裸 token**
+# （`_meta.source.share_id` / `payload.id`），不带域名。
+# 只匹配完整 URL 的规则对它**完全失明**——而「真实分享 id 不得出现」
+# 恰恰是本仓库最重要的一条红线。所以按**上下文**抓：
+# 字段名（share_id / shareId / share_url）后面跟着一串 token → 报。
+SHARE_ID_CTX_RE = re.compile(
+    r'(?:share_id|shareId|share_url|shareUrl)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]{16,})')
+
 # 纯 ASCII 的标识符（会话 UUID / 附件 file_id）
 UUID_RE = re.compile(
     r'(?<![0-9a-fA-F-])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
@@ -144,6 +152,46 @@ def _deobfuscate(text):
             text = regex.sub(lambda m: '"' + m.group(1) + m.group(2) + '"', text)
             out.append(text)
     return "\n".join(out)
+
+
+def _obfuscated_candidates(text):
+    """
+    产出「可能被解码还原」的候选串。
+
+    藏法不止拼接一种：chr() 求值、base64、hex 字节串、字符串反转，
+    都可能把真实 id 藏起来。这里各解一遍，得到的候选串交给调用方比对。
+    """
+    cands = []
+    # chr(54)+chr(54)+… → 字符序列
+    for m in re.finditer(r'(?:\bchr\(\s*\d+\s*\)\s*\+\s*){2,}[^\n]*', text):
+        try:
+            s = "".join(chr(int(x)) for x in re.findall(r'chr\(\s*(\d+)\s*\)', m.group(0)))
+            if s.strip():
+                cands.append(s)
+        except Exception:
+            pass
+    # base64
+    for m in re.finditer(r'[A-Za-z0-9+/]{20,}={0,2}', text):
+        import base64
+        try:
+            raw = base64.b64decode(m.group(0) + "==", validate=False)
+            s = raw.decode("utf-8", "replace")
+            if sum(1 for ch in s if ch.isprintable()) / max(1, len(s)) > 0.9:
+                cands.append(s)
+        except Exception:
+            pass
+    # hex 字节串
+    for m in re.finditer(r'(?:\\x[0-9a-fA-F]{2}){4,}', text):
+        try:
+            s = bytes(int(x, 16) for x in re.findall(r'\\x([0-9a-fA-F]{2})', m.group(0))).decode(
+                "utf-8", "replace")
+            if s.strip():
+                cands.append(s)
+        except Exception:
+            pass
+    # 反转
+    cands.append(text[::-1])
+    return cands
 
 
 def run_git(args, cwd=None):
@@ -295,8 +343,12 @@ def literal_scan(blobs, deny_tokens=()):
             continue
         # 看穿字符串拼接：真实 id 写成 "ab" + "cd" 时字面量扫描是看不见的
         scan_text = _deobfuscate(txt)
+        # 还要看穿 chr() / base64 / hex / 反转 几种藏法
+        variants = [scan_text] + _obfuscated_candidates(scan_text)
         for pat, label in LITERAL_PATTERNS:
             for m in re.finditer(pat, scan_text):
+                if _looks_like_placeholder(m.group(0)):
+                    continue
                 hits.append((label, tag, scan_text[:m.start()].count("\n") + 1,
                              m.group(0)[:60]))
         for m in SHARE_LINK_RE.finditer(scan_text):
@@ -304,6 +356,12 @@ def literal_scan(blobs, deny_tokens=()):
                 continue
             hits.append(("疑似真实分享链接", tag,
                          scan_text[:m.start()].count("\n") + 1, m.group(0)[:80]))
+        # 裸分享 id：字段名后面那串 token
+        for m in SHARE_ID_CTX_RE.finditer(scan_text):
+            if _looks_like_placeholder(m.group(1)):
+                continue
+            hits.append(("疑似真实分享 id", tag,
+                         scan_text[:m.start()].count("\n") + 1, m.group(1)[:40]))
         for m in UUID_RE.finditer(scan_text):
             if _looks_like_placeholder(m.group(0)) or _looks_synthetic_uuid(m.group(0)):
                 continue
@@ -314,6 +372,20 @@ def literal_scan(blobs, deny_tokens=()):
                 continue
             hits.append(("疑似机器名", tag,
                          scan_text[:m.start()].count("\n") + 1, m.group(0)[:40]))
+        # 解码还原出来的候选串里也查一遍
+        for var in variants[1:]:
+            for m in UUID_RE.finditer(var):
+                if _looks_like_placeholder(m.group(0)) or _looks_synthetic_uuid(m.group(0)):
+                    continue
+                hits.append(("疑似真实 UUID（解码还原后）", tag, 0, m.group(0)[:60]))
+            for m in SHARE_ID_CTX_RE.finditer(var):
+                if _looks_like_placeholder(m.group(1)):
+                    continue
+                hits.append(("疑似真实分享 id（解码还原后）", tag, 0, m.group(1)[:40]))
+            for m in MACHINE_SHAPE_RE.finditer(var):
+                if _looks_like_placeholder(m.group(0)):
+                    continue
+                hits.append(("疑似机器名（解码还原后）", tag, 0, m.group(0)[:40]))
         # 用户显式提供的个人标识符（作为**输入**，不进仓库）
         for tok in deny_tokens:
             if tok and tok in scan_text:

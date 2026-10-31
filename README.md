@@ -101,7 +101,15 @@ python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> 
 
 # ④ 调度器：打捞 + 转换一次完成（额外写一份 <base>.openai.json）
 python "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <share_id|share_url> --as openai --outdir <dir>
+
+# ⑤ 分享链接已失效/被删时：从**本地保存的原始 API JSON** 离线重建
+python "[path-to-skill]/scripts/extract_deepseek_share.py" --from-file <原始 API JSON> --format json
+python "[path-to-skill]/scripts/extract_deepseek_share.py" --from-file <原始 API JSON> --outdir <dir>
 ```
+
+> ⑤ 为什么重要：分享链接随时可能失效或被撤销（实测有一条会话的链接
+> 已返回「share is deleted or banned」）。没有离线入口，那条路径**再也回归不了**——
+> 「产物可复现、可审计、可回归」这条原则对分享侧就不成立。
 
 产物形态 `chatgpt-import/v1`：`messages[]` 字段对齐 OpenAI chat messages，
 `reasoning`（思考链）单独放不混进正文，`citations` 把正文引用标记映射回来源

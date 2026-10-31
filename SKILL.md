@@ -55,7 +55,7 @@ python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url> 
 | 脚本路径 | 先定位 `[path-to-skill]`，再运行 `[path-to-skill]/scripts/session_extract.py`，不要假定目标仓库有 `scripts/session_extract.py` |
 | 路径格式 | 脚本内用 `os.path.expanduser()` + `os.path.join()` |
 | 编码 | 统一 `encoding='utf-8'` |
-| 隔离模式 `python -I` | 解释器**不会**把脚本目录放进 `sys.path`，`from extract_codex import ...` 会 `ModuleNotFoundError`；脚本已显式 `sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))` 兜底 |
+| 隔离模式 `python -I` | 解释器**不会**把脚本目录放进 `sys.path`，`from extract_codex import ...` 会 `ModuleNotFoundError`；脚本已显式把脚本目录加进 `sys.path` 兜底（新代码用 **append** 而非 insert(0)：插在首位会让目录里的同名文件遮蔽标准库） |
 
 ## 脚本路径约定
 
@@ -248,8 +248,10 @@ python3 "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id|share_url>
 |---|---|---|
 | `text`（`--print` 等价） | 可读全文：提问 / 搜索结果 / 回复（跳过 THINK 链） | 否 |
 | `json` | `rescued-session/v1` 产物（含 `_meta.source` 溯源：端点 + share_id + 响应 sha256，**以及 `_meta.verification` 自证结果**） | 否 |
+| `openai` | **ChatGPT 网页版可直接上传**的产物（`messages` 数组 + 引用映射 + 来源清单） | 否 |
 | `openai` | **ChatGPT 网页版可直接上传**的产物：`messages` 数组 + 引用映射 + 来源清单 + 思考链。⚠️ 顶层带 `schema`/`meta`/`references` 等扩展字段，**不能直接 POST 给严格的 chat API**——那种场合用 `to_openai.py --strict`（只留 `role`/`content`） | 否 |
 | `raw` | 分享 API 原始 JSON（想自己再加工时用） | 否 |
+| （入口）`--from-file <原始 API JSON>` | **离线重建**：分享链接失效/被删后，从本地保存的原始响应复现产物（自证照常） | 否 |
 
 ```powershell
 # 机器可读产物 JSON（仍不落盘）
@@ -512,7 +514,7 @@ python "[path-to-skill]/scripts/desensitize_scan.py" --history `
 | 脚本 `--help` 不可用 | **已修复**：`session_extract.py` 现在支持 `--help`/`-h`（打印完整用法并退出 0）。其余模块本来就用 argparse。 | 现在的用法以 `--help` 输出为准；本文档是「为什么这么做」，不是命令清单 |
 | **DeepSeek 标题是自动摘要** | 标题由 DeepSeek 自动生成，和用户记忆里的措辞**经常**对不上——用户报的原话可能在正文里，一个字都不在标题里；但**也可能完全一致**（实战中目标会话的真实标题与用户报的完全一致） | **必须搜正文**：标题命中只是加权项，不能只搜标题。反过来也别假定标题一定对不上——两条路都要留 |
 | **分享链接的占位符标题会变文案** | 分享 API 的 `title` 是占位符，但**字符串不是恒定的**：见过「来自分享的对话」，也见过英文的「Shared Conversation」。写死 `== "来自分享的对话"` 会让 `title_is_placeholder` **静默变成 False**——不报错，只是给出一个假的「一切正常」信号，而下游正是靠这个字段决定「要不要人工确认标题」 | 归一后**名单匹配**（`deepseek_common.is_placeholder_title`），别写死单个字符串；两条路径共用同一把尺子 |
-| **搜索结果的 URL 带引用锚点** | DeepSeek 的搜索结果 URL 形如 `.../paper.pdf#7#22#7`，**同一篇文档在不同引用位置锚点不同**。按原始 URL 建字典 = 同一篇文章被登记成多条记录、互相不补字段（实测 296 条结果里 262 个唯一原始 URL，只有 253 个唯一文档；按原始 URL 去重会吞掉 8,160 字符的 snippet） | 合并主键用**归一 URL**（`deepseek_common.norm_url`），原值保留在 `url_original`；同文档的多个摘要收进 `variants`，**只留第一条就是丢数据**。⚠️ 计算 fragment 签名时必须剥掉派生字段，否则自证会把自己判失败 |
+| **搜索结果的 URL 带引用锚点** | DeepSeek 的搜索结果 URL 形如 `.../paper.pdf#7#22#7`，**同一篇文档在不同引用位置锚点不同**。按原始 URL 建字典 = 同一篇文章被登记成多条记录、互相不补字段（实测 2026-10-29 样本：分享侧 494 条结果里 239 个唯一原始 URL，只有 238 个唯一文档；按原始 URL 去重会吞掉 **63,309 字符（52.8%）**的 snippet） | 合并主键用**归一 URL**（`deepseek_common.norm_url`），原值保留在 `url_original`；同文档的多个摘要收进 `variants`，**只留第一条就是丢数据**。⚠️ 计算 fragment 签名时必须剥掉派生字段，否则自证会把自己判失败 |
 | **两条路径的引用标记语义不同** | 分享链接路径的 `[reference:N]` 里 N 是该消息 `references[]` 的**下标**；账号导出包路径**根本没有 references[]**，且被引用的 TOOL_OPEN 片段在导出包里**没有载荷**——原理上还原不出「哪个标记指向哪个页面」 | 两条路径分开处理（`to_openai.py`）。⚠️ **fragment id 在不同消息之间会重复**，查片段必须按消息作用域。⚠️ 还原不出就**如实标「无法解析」+ 给候选来源池，不要猜**——实测「标记 N → 搜索结果第 N 个」有 65/71 与真值不符，那是**把来源猜错了**；错误的来源比没有来源更糟 |
 | **解压出的文件夹可能是旧快照** | DeepSeek 导出包是下载时刻的快照，而用户解压出来的文件夹可能来自更早的一次下载、且文件名日期与内容不一致 | 打捞前必须分别计算 **zip 内层文件** 与 **解压出的文件夹文件** 的 sha256 并比对，二者不一致时**以 zip 为准**；不要相信文件夹名，也不要相信单次 `md5sum` 的输出（本次即被误报为两者相同） |
 | **DeepSeek 聊天树不是列表** | `mapping` 是树，重新生成答案会 fork 出兄弟分支；朴素遍历 `mapping.values()` 会把两条矛盾分支拼在一起 | 从 `root` 深度优先线性化，并补捞 root 不可达的孤儿节点（脚本已实现） |

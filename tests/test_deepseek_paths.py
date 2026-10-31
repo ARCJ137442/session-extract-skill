@@ -1071,3 +1071,93 @@ class TestCorpusProbes(unittest.TestCase):
         self.assertTrue(desensitize_scan._is_good_probe(
             "upload silently failed after restart"))
         self.assertFalse(desensitize_scan._is_good_probe("   }  "))
+
+
+class TestExplicitPlatformGuardrail(unittest.TestCase):
+    """
+    守住坑 20：显式 `--platform` 也必须有护栏。
+
+    以前只有**自动探测**路径有「认不出就报错」的护栏；用户显式指定时
+    护栏**永不触发** → 拿 Claude 会话按 codex 解析 → 得到一份
+    **全是 N/A 的假报告**而且 exit 0。
+    （实测三平台 × 三格式矩阵：只有 deepseek 因为解析器抛异常才偶然 exit 1。）
+    """
+
+    def _write(self, td, name, lines):
+        p = os.path.join(td, name)
+        with open(p, "w", encoding="utf-8") as f:
+            for l in lines:
+                f.write(json.dumps(l, ensure_ascii=False) + "\n")
+        return p
+
+    def _run(self, args):
+        import subprocess
+        import sys as _sys
+        scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "scripts")
+        return subprocess.run([_sys.executable, "-I",
+                               os.path.join(scripts, "session_extract.py")] + args,
+                              capture_output=True, text=True)
+
+    def test_wrong_platform_is_error_not_empty_report(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "s.jsonl", [
+                {"type": "mode", "sessionId": "s1", "mode": "default"},
+                {"type": "user", "sessionId": "s1", "uuid": "u1",
+                 "message": {"role": "user", "content": "【合成样例】你好"},
+                 "timestamp": "2026-01-01T00:00:00Z"},
+            ])
+            r = self._run(["--platform", "codex", p])
+            self.assertNotEqual(r.returncode, 0, "平台不符必须报错退出")
+            self.assertIn("不一致", (r.stdout or "") + (r.stderr or ""))
+            self.assertNotIn("N/A", r.stdout, "不能输出全 N/A 的假报告")
+
+    def test_correct_platform_still_works(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "s2.jsonl", [
+                {"type": "mode", "sessionId": "s2", "mode": "default"},
+                {"type": "user", "sessionId": "s2", "uuid": "u1",
+                 "message": {"role": "user", "content": "【合成样例】你好"},
+                 "timestamp": "2026-01-01T00:00:00Z"},
+            ])
+            r = self._run(["--platform", "claude", p])
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("CLAUDE", r.stdout)
+
+
+class TestBareShareIdDetection(unittest.TestCase):
+    """
+    守住坑 21：门禁不能对**裸分享 id** 失明。
+
+    本 skill 的产物里 `share_id` 就是一串**裸 token**
+    （`_meta.source.share_id` / `payload.id`），不带域名——
+    只匹配完整 URL 的规则对它完全失明，而「真实分享 id 不得出现」
+    恰恰是最重要的那条红线。
+    """
+
+    def test_bare_share_id_detected(self):
+        import desensitize_scan
+        blobs = [("worktree:x.json", '{"share_id": "<合成 id>"}')]
+        hits = [h for h in desensitize_scan.literal_scan(blobs)
+                if "分享 id" in h[0]]
+        self.assertTrue(hits, "裸 share id 必须被抓到")
+
+    def test_placeholder_share_id_not_flagged(self):
+        import desensitize_scan
+        blobs = [("worktree:x.json", '{"share_id": "<18位ID>"}')]
+        hits = [h for h in desensitize_scan.literal_scan(blobs)
+                if "分享 id" in h[0]]
+        self.assertFalse(hits, "占位形式不该报")
+
+    def test_decoded_candidates_are_checked(self):
+        """chr() / base64 藏起来的真实 id 也必须被抓到。"""
+        import base64
+        import desensitize_scan
+        ident = "<合成 id>"
+        b64 = base64.b64encode(ident.encode()).decode()
+        blobs = [("worktree:x.py", 'x = "' + b64 + '"')]
+        cands = desensitize_scan._obfuscated_candidates(blobs[0][1])
+        self.assertTrue(any(ident in c for c in cands),
+                        "base64 藏起来的 id 必须被还原出来")
