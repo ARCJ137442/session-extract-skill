@@ -962,3 +962,110 @@ class TestScannerTrustworthiness(unittest.TestCase):
         self.assertFalse(self.scan._is_good_probe("a b c"))
         self.assertTrue(self.scan._is_good_probe("这是一句足够长的中文句子内容"))
         self.assertTrue(self.scan._is_good_probe("this is an english phrase here"))
+
+
+class TestConsoleEncoding(unittest.TestCase):
+    """
+    守住坑 17：Windows 上「跟随控制台码页」曾经是**假的**。
+
+    旧实现把 "utf-8" 放在候选列表第一位，而它必然可编码 → 函数恒返回 utf-8，
+    算出来的码页从未被使用 → 在标准中文 Windows（cp936）上照样静默乱码。
+    而所有测试都在 cp65001 下跑，**测不出来**。
+    """
+
+    def test_utf8_console(self):
+        import ctypes
+        import deepseek_common
+        if os.name != "nt":
+            self.skipTest("非 Windows")
+        old = ctypes.windll.kernel32.GetConsoleOutputCP()
+        try:
+            ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+            self.assertEqual(deepseek_common.console_encoding(), "utf-8")
+        finally:
+            ctypes.windll.kernel32.SetConsoleOutputCP(old)
+
+    def test_legacy_console_page(self):
+        import ctypes
+        import deepseek_common
+        if os.name != "nt":
+            self.skipTest("非 Windows")
+        old = ctypes.windll.kernel32.GetConsoleOutputCP()
+        try:
+            ctypes.windll.kernel32.SetConsoleOutputCP(936)
+            enc = deepseek_common.console_encoding()
+            self.assertNotEqual(enc, "utf-8",
+                                "cp936 控制台下不能返回 utf-8（会被按 GBK 解码成乱码）")
+            "中文".encode(enc)      # 必须是真实可用的编码
+        finally:
+            ctypes.windll.kernel32.SetConsoleOutputCP(old)
+
+
+class TestOfflineRebuild(unittest.TestCase):
+    """
+    守住坑 18：分享链接随时可能失效/被删。
+
+    实测那条会话的链接已经返回「share is deleted or banned」——
+    没有 `--from-file` 离线重建入口，那条路径**再也回归不了**，
+    「产物可复现」这条原则对分享侧就不成立。
+    """
+
+    def test_from_file_rebuilds_product(self):
+        import tempfile
+        import extract_deepseek_share as eds
+        doc = {"code": 0, "data": {"biz_data": synthetic_biz()}}
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "orig.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False)
+            payload = eds.build_payload(
+                doc["data"]["biz_data"], doc["data"]["biz_data"]["messages"], [],
+                share_id="offline")
+            self.assertTrue(payload["transcript"])
+            # extract() 的离线分支：from_file 存在时不联网
+            result = eds.extract(None, from_file=p)
+            self.assertTrue(result["conversations"][0]["transcript"])
+            self.assertTrue(result["_meta"]["verification"]["ok"])
+
+    def test_cli_requires_share_or_from_file(self):
+        import subprocess
+        import sys as _sys
+        scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "scripts")
+        r = subprocess.run([_sys.executable, "-I",
+                            os.path.join(scripts, "extract_deepseek_share.py"),
+                            "--format", "json"],
+                           capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("share_id", (r.stderr or "") + (r.stdout or ""))
+
+
+class TestCorpusProbes(unittest.TestCase):
+    """
+    守住坑 19：门禁对两类真实语料曾经**完全失明**——
+    搜索结果的 snippet（发布说明原文、引文都在那里），以及英文语料。
+    """
+
+    def test_snippet_is_treated_as_corpus(self):
+        import tempfile
+        import desensitize_scan
+        doc = {"data": {"biz_data": {"messages": [{
+            "fragments": [{
+                "type": "TOOL_SEARCH",
+                "results": [{"url": "https://example.invalid/a",
+                             "snippet": "这是一段只有搜索结果里才有的发布说明原文内容"}],
+            }],
+        }]}}}
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "c.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(doc, f, ensure_ascii=False)
+            texts = desensitize_scan.load_corpus_texts([p])
+        self.assertTrue(any("发布说明原文" in t for t in texts),
+                        "搜索结果的 snippet 必须被当作语料")
+
+    def test_english_probe_allowed(self):
+        import desensitize_scan
+        self.assertTrue(desensitize_scan._is_good_probe(
+            "【合成样例】探针样句 【合成样例】发布说明片段"))
+        self.assertFalse(desensitize_scan._is_good_probe("   }  "))

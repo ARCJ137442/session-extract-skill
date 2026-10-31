@@ -71,9 +71,13 @@ UUID_RE = re.compile(
     r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-fA-F-])')
 
 # 通用机器名**形态**（不含具体人名）：形如 XXX-LAPTOP-20220805
-# ⚠️ 中间段必须是**大写**（LAPTOP / DESKTOP 这种形态）；
-#    否则「UUID 里的 -4444-555555555555」也会被误当成机器名。
-MACHINE_SHAPE_RE = re.compile(r'-\w{3,}-[A-Z]{3,}-\d{6,}\b')
+# 通用机器名**形态**（不含具体人名）。
+# ⚠️ 必须覆盖真实形态：**三段** `名称-LAPTOP-20220805`
+#    （以前只匹配四段 `-A-B-数字`，真实机器名全是三段 → 整条规则失明，
+#      而自带测试用的是四段夹具，于是它一直「通过」）
+MACHINE_SHAPE_RE = re.compile(
+    r'(?:\w{3,}-)?[A-Z]{3,}-\d{6,8}\b'          # NAME-LAPTOP-20220805 / LAPTOP-20220805
+    r'|(?:\w{3,}-){2}[A-Z]{3,}-\d{6,8}\b')     # HOST-NAME-LAPTOP-20220805
 
 # 扫描器自身：黑名单里必然含有这些模式（按**路径**排除）
 SELF_FILE = "desensitize_scan.py"
@@ -328,6 +332,13 @@ def _collect_conversation_text(doc, include_assistant=False):
         for fr in msg.get("fragments") or []:
             if fr.get("type") in want and fr.get("content"):
                 out.append(fr["content"])
+            # ⚠️ 搜索结果的 **snippet** 也是语料——发布说明原文、引文、
+            # 网页摘录都在这里。以前只读 content，等于漏掉了一整类泄漏面。
+            for r in (fr.get("results") or []):
+                if isinstance(r, dict) and r.get("snippet"):
+                    out.append(r["snippet"])
+            if isinstance(fr.get("result"), dict) and fr["result"].get("snippet"):
+                out.append(fr["result"]["snippet"])
     conversations = doc if isinstance(doc, list) else (
         doc.get("conversations") if isinstance(doc, dict) else [])
     for conv in conversations or []:
@@ -341,6 +352,11 @@ def _collect_conversation_text(doc, include_assistant=False):
             for fr in msg.get("fragments") or []:
                 if fr.get("type") in want and fr.get("content"):
                     out.append(fr["content"])
+                for r in (fr.get("results") or []):
+                    if isinstance(r, dict) and r.get("snippet"):
+                        out.append(r["snippet"])
+                if isinstance(fr.get("result"), dict) and fr["result"].get("snippet"):
+                    out.append(fr["result"]["snippet"])
     return out
 
 
@@ -386,7 +402,8 @@ def _is_good_probe(w):
     纯空白 + 一两个符号的窗口（「}」「 o」）在任何代码里都会出现——
     命中全是噪声，会把真正的泄漏淹没。所以要求：
     - 中文行：窗口里至少 4 个汉字
-    - 英文行：至少 3 个长度 ≥3 的单词
+    - 英文行：**至少 2 个长度 ≥3 的单词**（以前要求 3 个 → 英文语料几乎
+      全被滤掉，实测 4570 个探针里纯 ASCII 只有 44 个——等于没扫英文）
     """
     if not w.strip():
         return False
@@ -394,7 +411,7 @@ def _is_good_probe(w):
     if cjk >= 4:
         return True
     words = [x for x in w.split() if len(x) >= 3]
-    return len(words) >= 3
+    return len(words) >= 2
 
 
 def ngram_scan(blobs, corpus_texts, probe_len=20, step=10, short_len=12):
@@ -420,7 +437,7 @@ def ngram_scan(blobs, corpus_texts, probe_len=20, step=10, short_len=12):
             sizes = []
             if cjk >= 4:
                 sizes = [short_len, probe_len]
-            elif len(line) >= 40 and line.count(" ") >= 6:
+            elif len(line) >= 30 and line.count(" ") >= 3:
                 sizes = [probe_len]
             else:
                 continue

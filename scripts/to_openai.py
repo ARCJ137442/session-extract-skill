@@ -351,12 +351,20 @@ def _reconvert(doc, conv, title=None, note=None, slim=False, source_meta=None):
         "messages": messages,
         "references": conv.get("references") or [],
     }
+    # ⚠️ **必须把源容器一起带走**：以前重转时只重建了 messages/references，
+    # 原始容器（raw_messages / raw_mapping）被丢掉，却仍然标 lossless=True ——
+    # 那是**谎报无损**。现在有容器就带上，没有就不标无损。
+    has_raw = False
+    for key in ("raw_messages", "raw_mapping"):
+        if conv.get(key) is not None:
+            out[key] = conv[key]
+            has_raw = True
     out["meta"].update({
         "converted_at": _now_iso(),
         "message_count": len(messages),
         "user_turns": sum(1 for m in messages if m["role"] == "user"),
         "assistant_turns": sum(1 for m in messages if m["role"] == "assistant"),
-        "lossless": not slim,
+        "lossless": (not slim) and has_raw,
         "idempotent_reconvert": True,
     })
     if source_meta:

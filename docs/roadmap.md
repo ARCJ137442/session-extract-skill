@@ -24,7 +24,7 @@
 | 占位符标题名单化 | 标题占位符的**文案会变**（中文 / 英文都出现过），写死字符串会让 `title_is_placeholder` 静默误判 | 静默的假信号比报错更危险 |
 | URL 锚点归一 | 结果条目新增 `url_normalized` / `url_anchor`；原值不动；同文档的多个摘要收进 `variants` | 同一篇文章被登记成多条、snippet 互相不补齐 |
 | 只读模式自证 | `--format json` 的 `_meta.verification` 带着多重集自证结果 | 「没丢没重」要随产物一起流转，而不是靠人记得跑 `--verify` |
-| stdout UTF-8 | stdout/stderr 统一 `reconfigure(encoding="utf-8")` | Windows 重定向到文件时 locale 编码会吞掉非 ASCII 字符 |
+| stdout 跟随控制台码页 | `console_encoding()` 用 `GetConsoleOutputCP()` 取真实码页 | 钉死 UTF-8 会被 PowerShell 按 cp936 解码 → **静默乱码**；要字节级保真走 `--out`/`--outdir` |
 | ChatGPT/OpenAI 形态 | `--format openai` / `to_openai.py` / `--as openai` | **本轮最关键的一项**：搬运规则沉淀在 skill 里 |
 | 假 PASS 修复 | 校验跑不起来时报 `SKIPPED` + 退出码 4，**不再报 PASS** | 「没验过」≠「验过了」 |
 | 回归测试 | `tests/test_deepseek_paths.py`（合成数据，stdlib unittest） | 一次惨烈的 bug 复盘只留在注释里，下一次重构就会重演 |

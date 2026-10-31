@@ -44,8 +44,14 @@ def console_encoding():
     try:
         import ctypes
         cp = ctypes.windll.kernel32.GetConsoleOutputCP()
-        if cp and cp != 0:
-            for enc in ("utf-8", "gbk", "cp" + str(cp)):
+        if cp == 65001:
+            return "utf-8"
+        if cp:
+            # ⚠️ 顺序要紧：必须**先试码页本身**。
+            # 以前把 "utf-8" 放在第一位，而它必然可编码 → 函数恒返回 utf-8，
+            # 算出来的 cp 从未被使用 → 「跟随码页」其实是**假的**，
+            # 在标准中文 Windows 上照样静默乱码。
+            for enc in ("cp" + str(cp), "gbk"):
                 try:
                     "x".encode(enc)
                     return enc

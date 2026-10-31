@@ -183,6 +183,12 @@ def fetch_share(share_id):
     return text, doc
 
 
+def _read_text_file(path):
+    """读一个本地文本文件（分享 API 原始 JSON 的存档）。"""
+    with open(os.path.expanduser(path), "r", encoding="utf-8-sig") as f:
+        return f.read()
+
+
 def file_sha256(path):
     """本地文件校验和。"""
     h = hashlib.sha256()
@@ -534,7 +540,8 @@ def build_meta(raw_text, share_id, raw_messages, reason=None, mode="extract"):
     }
 
 
-def extract(share, title=None, reason=None, outdir=None, want_thumbnail=True):
+def extract(share, title=None, reason=None, outdir=None, want_thumbnail=True,
+            from_file=None):
     """
     提取入口：返回 rescued-session/v1 结构的 dict。
 
@@ -543,9 +550,17 @@ def extract(share, title=None, reason=None, outdir=None, want_thumbnail=True):
                    真实标题得从网页端侧边栏确认后再传进来）
     reason     —— 打捞理由，写进 _meta.extraction.rescue_reason
     outdir     —— 给了就把附件字节下到 <outdir>/附件/ 并填 local_path
+    from_file  —— 给了就**离线重建**：从本地保存的分享 API 原始 JSON 读，
+                   不联网。分享链接随时可能失效/被删——没有这条路径，
+                   「产物可复现、可回归」对分享侧就不成立。
     """
-    share_id = normalise_share_id(share)
-    raw_text, doc = fetch_share(share_id)
+    if from_file:
+        raw_text = _read_text_file(from_file)
+        doc = json.loads(raw_text)
+        share_id = (doc.get("data") or {}).get("share_id") or "offline"
+    else:
+        share_id = normalise_share_id(share)
+        raw_text, doc = fetch_share(share_id)
     biz = doc["data"]["biz_data"]
     raw_messages = biz.get("messages") or []
 
@@ -700,7 +715,8 @@ def safe_filename(payload):
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="从 DeepSeek 网页版分享链接提取完整会话（含附件二进制）")
-    ap.add_argument("share", help="share_id 或完整分享链接")
+    ap.add_argument("share", nargs="?", default=None,
+                    help="share_id 或完整分享链接（用 --from-file 时可省略）")
     ap.add_argument("--outdir", default=None,
                     help="输出目录（附件落在 <outdir>/附件/）；不与 --format 同用")
     ap.add_argument("--format", choices=("text", "json", "openai", "raw"), default=None,
@@ -712,6 +728,9 @@ def main(argv=None):
     ap.add_argument("--reason", default=None, help="打捞理由")
     ap.add_argument("--markdown", action="store_true", help="同时写 .md 预览（需 --outdir）")
     ap.add_argument("--no-thumbnail", action="store_true", help="不下载缩略图")
+    ap.add_argument("--from-file", default=None,
+                    help="从**本地保存的分享 API 原始 JSON** 离线重建产物"
+                         "（分享链接失效后仍可回归）")
     ap.add_argument("--slim", action="store_true",
                     help="--format openai 时去掉 fragments/raw 兜底，产出小文件（上传更快）")
     ap.add_argument("--verify", action="store_true", help="多重集自证")
@@ -722,14 +741,26 @@ def main(argv=None):
         ap.error("需要 --outdir（落盘）或 --format/--print（只读到 stdout）")
     if a.outdir and fmt:
         ap.error("--outdir 与 --format/--print 不能同时用")
+    if not a.share and not a.from_file:
+        ap.error("需要 <share_id|share_url>，或用 --from-file <原始 API JSON>")
+    if a.share and a.from_file:
+        ap.error("--from-file 与 <share> 只能给一个（前者离线、后者联网）")
 
     # ---- 只读模式：读到 stdout，不落盘，也不下载附件 ----
     if fmt:
         # 网络异常要**如实报错**而不是抛栈：以前这条分支完全没有 try/except，
         # urllib 的 HTTPError/URLError 直接把 traceback 甩到调用方脸上。
         try:
-            share_id = normalise_share_id(a.share)
-            raw_text, doc = fetch_share(share_id)
+            if a.from_file:
+                # 离线重建：从**已保存的原始 API JSON** 复现产物。
+                # 分享链接随时可能失效/被删——没有这个入口，
+                # 「产物可复现、可回归」这条原则对分享侧就不成立了。
+                raw_text = _read_text_file(a.from_file)
+                doc = json.loads(raw_text)
+                share_id = (doc.get("data") or {}).get("share_id") or "offline"
+            else:
+                share_id = normalise_share_id(a.share)
+                raw_text, doc = fetch_share(share_id)
         except (OSError, RuntimeError, ValueError) as e:
             sys.stderr.write("ERROR: {}\n".format(e))
             return 2
@@ -775,6 +806,7 @@ def main(argv=None):
 
     try:
         result = extract(a.share, title=a.title, reason=a.reason, outdir=outdir,
+                         from_file=a.from_file,
                          want_thumbnail=not a.no_thumbnail)
     except (RuntimeError, ValueError) as e:
         print("ERROR: {}".format(e))

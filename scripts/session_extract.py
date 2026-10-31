@@ -382,11 +382,15 @@ def _openai_variant_path(out_path):
 
 def _write_openai_variant(meta, convs, path, title=None):
     """
-    额外写一份「ChatGPT / OpenAI 可直接用」的产物。
+    额外写一份「ChatGPT 网页版可直接上传」的产物。
 
     这是「不需要写长脚本」的落地方式：打捞完直接得到一个能上传到
-    ChatGPT 网页版、或直接喂给任意 OpenAI 兼容端点的 messages 结构，
-    不必再自己写一遍转换器（折叠 fragment、映射引用、归一 URL 锚点）。
+    ChatGPT 网页版的 messages 结构，不必再自己写一遍转换器
+    （折叠 fragment、映射引用、归一 URL 锚点）。
+
+    ⚠️ 该产物带 schema/meta/references/citations 等扩展字段，
+    **不能直接 POST 给严格的 chat API**——那种场合用
+    `to_openai.py --strict`（只留 role / content）。
     """
     try:
         import to_openai
