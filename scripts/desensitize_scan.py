@@ -395,15 +395,16 @@ def _is_probably_prose(text, min_cjk=6):
     return False
 
 
-def _is_good_probe(w):
+def _is_good_probe(w, min_words_long=2, min_words_short=3):
     """
     探针必须**自身**有内容。
 
     纯空白 + 一两个符号的窗口（「}」「 o」）在任何代码里都会出现——
     命中全是噪声，会把真正的泄漏淹没。所以要求：
     - 中文行：窗口里至少 4 个汉字
-    - 英文行：**至少 2 个长度 ≥3 的单词**（以前要求 3 个 → 英文语料几乎
-      全被滤掉，实测 4570 个探针里纯 ASCII 只有 44 个——等于没扫英文）
+    - 英文行：长窗口（20 字）至少 2 个长度 ≥3 的单词；
+      **短窗口（12 字）要 3 个**——否则「Claude Opus」这种**通用技术名词**
+      会到处命中（它既在语料里、也在正常的提交署名里），把门禁刷红。
     """
     if not w.strip():
         return False
@@ -411,7 +412,8 @@ def _is_good_probe(w):
     if cjk >= 4:
         return True
     words = [x for x in w.split() if len(x) >= 3]
-    return len(words) >= 2
+    need = min_words_long if len(w) >= 18 else min_words_short
+    return len(words) >= need
 
 
 def ngram_scan(blobs, corpus_texts, probe_len=20, step=10, short_len=12):
