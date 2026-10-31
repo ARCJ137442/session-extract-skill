@@ -528,6 +528,17 @@ def merge(export_doc, share_doc):
         "sources": sources,
         "merge": {
             "strategy": "union-by-(node_id,type,ordinal)",
+            # ⚠️ 并集产物**不内嵌**自证结果（它同时含两种来源，内嵌单一自证说不清跟谁比），
+            # 所以必须**显式告诉下游**：本产物要另跑门禁才算自证过。
+            # 不写这一条，下游看到「没有 verification 字段」无法区分
+            # 「验过了但字段为空」与「压根没验」——正是 skill 第 15 条原则反对的。
+            "self_proof": {
+                "embedded": False,
+                "how": ("另跑 scripts/verify_merged_deepseek.py --export <导出包产物.json> "
+                        "--share <分享侧原始 API JSON> --merged <本产物.json>"),
+                "assertions": "A1–A7（片段/节点/snippet/变体不丢 + 同一文档不重复）",
+                "exit_codes": "0 = 全过 / 3 = 有断言失败",
+            },
             "node_counts": {
                 "export": len(exp_nodes),
                 "share": len(sh_nodes),

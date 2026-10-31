@@ -78,6 +78,30 @@ def _looks_like_placeholder(text):
     return any(w in low for w in PLACEHOLDER_WORDS)
 
 
+def _looks_synthetic_uuid(u):
+    """
+    明显是凑出来的 UUID 不算泄露。
+
+    判据：任一段是**同一个字符重复**（00000000 / 11111111），
+    或第一段是简单递增序列（01234567）——这类是测试夹具，
+    而真实的会话 UUID 是随机的。
+    """
+    parts = u.split("-")
+    if len(parts) != 5:
+        return False
+    for p in parts:
+        if len(set(p)) == 1:
+            return True
+    first = parts[0]
+    if len(set(first)) == len(first):
+        # 递增序列：01234567 / 12345678 …
+        digits = [c for c in first if c.isdigit()]
+        if len(digits) == len(first) and all(
+                int(digits[i]) + 1 == int(digits[i + 1]) for i in range(len(digits) - 1)):
+            return True
+    return False
+
+
 def run_git(args, cwd=None):
     r = subprocess.run(["git"] + args, cwd=cwd, capture_output=True)
     return r.stdout.decode("utf-8", "replace")
@@ -195,7 +219,7 @@ def literal_scan(blobs):
             hits.append(("疑似真实分享链接", tag,
                          txt[:m.start()].count("\n") + 1, m.group(0)[:80]))
         for m in UUID_RE.finditer(txt):
-            if _looks_like_placeholder(m.group(0)):
+            if _looks_like_placeholder(m.group(0)) or _looks_synthetic_uuid(m.group(0)):
                 continue
             hits.append(("疑似真实 UUID", tag,
                          txt[:m.start()].count("\n") + 1, m.group(0)[:60]))

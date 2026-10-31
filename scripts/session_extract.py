@@ -141,7 +141,7 @@ def extract(filepath, platform=None):
             "无法识别会话格式（platform=unknown）。"
             "请用 --platform 显式指定：codex / claude / deepseek。"
             "（若这是 Claude Code 会话，常见原因是文件头几行是旁路记录，"
-            "现在会自动往后扫 40 行，但仍认不出时请手动指定。）"
+            "现在会自动往后扫 2000 行，但仍认不出时请手动指定。）"
         )
 
 

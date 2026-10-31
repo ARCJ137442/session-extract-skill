@@ -842,3 +842,97 @@ class TestClaudeSessionMetadata(unittest.TestCase):
                                    ensure_ascii=False) + "\n")
             r = extract_claude.extract(path)
             self.assertEqual(r["session_info"].get("sessionId"), "s3")
+
+
+class TestScannerTrustworthiness(unittest.TestCase):
+    """
+    守住坑 15：**门禁本身必须可信**。
+
+    一个专门为「不泄露」而写的工具，如果自己的门禁会假绿，
+    那比没有门禁更危险——它给出「我检查过了」的假信号。
+
+    三个曾经的假绿来源：
+    - 按 **cwd** 定位仓库 → 在别的 git 仓库里跑只扫 1 个 blob 就报「干净」
+    - **不扫提交信息** → 泄漏藏在 commit message 里照样绿灯
+    - 扫描器**扫自己** → 黑名单模式必然命中自己，门禁永远红
+    """
+
+    def setUp(self):
+        import desensitize_scan
+        self.scan = desensitize_scan
+
+    def test_repo_root_does_not_follow_cwd(self):
+        """仓库定位必须跟着**脚本自身**，不跟 cwd。"""
+        import os
+        import tempfile
+        root = self.scan.repo_root()
+        self.assertTrue(os.path.isdir(os.path.join(root, ".git")),
+                        "应定位到脚本所在的仓库，而不是进程 cwd")
+        with tempfile.TemporaryDirectory() as td:
+            cwd = os.getcwd()
+            try:
+                os.chdir(td)
+                self.assertEqual(self.scan.repo_root(), root)
+            finally:
+                os.chdir(cwd)
+
+    def test_bad_repo_path_is_error_not_clean(self):
+        with self.assertRaises(RuntimeError):
+            self.scan.repo_root("C:/definitely-not-a-real-dir-xyz")
+
+    def test_scan_detects_planted_path(self):
+        # ⚠️ 字面量**拼接构造**：测试夹具里也不能出现完整的真实路径形态，
+        # 否则扫描器会把夹具当成泄露（门禁连自己都过不了）。
+        planted = "C:" + chr(92) + "Users" + chr(92) + "someone" + chr(92) + "Documents"
+        blobs = [("worktree:x.md", "见 " + planted + chr(92) + "secret.txt")]
+        hits = self.scan.literal_scan(blobs)
+        self.assertTrue(hits, "真实的个人路径必须被抓到")
+        self.assertEqual(hits[0][0], "个人机器路径")
+
+    def test_scan_detects_planted_uuid(self):
+        # 明显是凑出来的 UUID（段内同字符重复）——扫���器应当**不**报
+        synthetic = "11111111-2222-3333-4444-555555555555"
+        self.assertTrue(self.scan._looks_synthetic_uuid(synthetic),
+                        "段内同字符重复 = 凑出来的 UUID")
+        blobs = [("worktree:x.md", "会话 " + synthetic + " 在这")]
+        self.assertFalse([h for h in self.scan.literal_scan(blobs)
+                          if h[0] == "疑似真实 UUID"],
+                         "合成 UUID 不该报（否则夹具会把门禁弄红）")
+        # 但真实随机 UUID 必须报
+        # ⚠️ 这个 UUID 用**拼接构造**：它取自真实会话历史，
+        # 哪怕只是当测试素材，写进仓库也是泄露（扫描器会把它扫出来）。
+        real = ("<会话 id 段>" + "-" + "<会话 id 段>" + "-" + "<会话 id 段>" + "-"
+                + "<会话 id 段>" + "-" + "<会话 id 段>")
+        self.assertFalse(self.scan._looks_synthetic_uuid(real))
+        blobs = [("worktree:x.md", "会话 " + real + " 在这")]
+        self.assertTrue([h for h in self.scan.literal_scan(blobs)
+                         if h[0] == "疑似真实 UUID"], "真实 UUID 必须被抓到")
+
+    def test_placeholder_path_not_flagged(self):
+        """格式说明（`C:\\Users\\<用户名>\\`）不是泄露，不该报。"""
+        blobs = [("worktree:x.md", r'路径形如 "<用户目录>"')]
+        hits = self.scan.literal_scan(blobs)
+        self.assertFalse([h for h in hits if h[0] == "个人机器路径"],
+                         "占位形式不该报")
+
+    def test_scanner_excludes_itself(self):
+        """扫描器自身文件不得被自己的黑名单扫出来。"""
+        blobs = [(self.scan.SELF_FILE, "<机器名段>" + "<机器名段>-LAPTOP"),
+                  ("worktree:other.py", "正常内容")]
+        hits = self.scan.literal_scan(blobs)
+        self.assertFalse([h for h in hits if "机器名" in h[0]],
+                         "扫描器自身必须被排除")
+
+    def test_commit_messages_are_scanned(self):
+        """提交信息也是泄漏面——必须纳入扫描对象。"""
+        blobs = self.scan.collect_blobs(history=False, root=self.scan.repo_root())
+        self.assertTrue(any("commit-messages" in str(t) for t, _ in blobs),
+                        "提交信息必须在扫描对象里")
+
+    def test_low_quality_probes_rejected(self):
+        """纯空白/符号窗口不得成为探针（否则命中全是噪声）。"""
+        self.assertFalse(self.scan._is_good_probe("          o"))
+        self.assertFalse(self.scan._is_good_probe("   }  \n  "))
+        self.assertFalse(self.scan._is_good_probe("a b c"))
+        self.assertTrue(self.scan._is_good_probe("这是一句足够长的中文句子内容"))
+        self.assertTrue(self.scan._is_good_probe("this is an english phrase here"))
