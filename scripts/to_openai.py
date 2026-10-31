@@ -40,19 +40,13 @@ import sys
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
-    from deepseek_common import norm_url, url_anchor
+    from deepseek_common import norm_url, url_anchor, setup_streams
 except ImportError:  # pragma: no cover
     raise RuntimeError("deepseek_common.py is missing next to this script.")
 
-# stdout 编码钉死：Windows 上 stdout 被重定向到文件/管道时编码会从 UTF-8
-# 掉回 locale（中文 Windows = cp936），而本模块的输出含「⚠️」(U+26A0+VS16)
-# 等非 cp936 字符 —— 直接 UnicodeEncodeError 崩掉，产物 0 字节。
-# （写文件的地方本来就显式指定了 encoding="utf-8"，stdout 之前是漏的。）
-for _stream in ("stdout", "stderr"):
-    try:
-        getattr(sys, _stream).reconfigure(encoding="utf-8")
-    except (AttributeError, ValueError):  # pragma: no cover - 非标准流
-        pass
+# stdout 编码跟随**控制台码页**（见 deepseek_common.console_encoding）：
+# 钉死 UTF-8 会被 PowerShell 按 cp936 解码 → 中文静默乱码。
+setup_streams()
 
 SCHEMA = "chatgpt-import/v1"
 
@@ -562,7 +556,7 @@ def _decode_auto(data):
 
     所以：utf-8-sig / utf-16 / utf-8 依次尝试。
     """
-    for enc in ("utf-8-sig", "utf-16"):
+    for enc in ("utf-8-sig", "utf-16", "gbk"):
         try:
             return data.decode(enc)
         except UnicodeDecodeError:
@@ -589,6 +583,13 @@ def main(argv=None):
         # ⚠️ 自动识别编码：PowerShell 的 `>` 可能写出 UTF-16LE，管道可能带 BOM
         with open(a.product, "rb") as f:
             doc = json.loads(_decode_auto(f.read()))
+        if isinstance(doc, list):
+            # 输入是 `--strict` 出来的裸 messages 数组——它**已经**是最终形态，
+            # 再转一遍没有意义。给一句人话，而不是裸 AttributeError 栈。
+            sys.stderr.write(
+                "ERROR: 这个文件是 --strict 的 messages 数组（role/content），"
+                "不是 rescued-session/v1 产物，不需要再转换。\n")
+            return 2
     else:
         # ⚠️ 必须显式解码：Windows 上 stdin 的默认编码是 locale（中文 = cp936），
         # 而上游产物是 UTF-8 —— 直接 sys.stdin.read() 会抛 UnicodeDecodeError

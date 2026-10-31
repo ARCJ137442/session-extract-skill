@@ -8,14 +8,22 @@
 真实附件的 file_id / 字节数，都曾以「示例」的名义留在文档里。
 字面量扫描抓不到这类，**只有 n-gram 比对能抓到**。
 
-三条设计铁律（都是被验收员抓出来之后补的）：
+六条设计铁律（每一条都是被独立验收员抓出来之后补的）：
 
 1. **不许假绿**：扫不到东西时必须**报错退出**，绝不报「干净」。
    仓库定位用**脚本自身所在目录**向上找 git 根，**不继承进程 cwd**
    ——否则在别的 git 仓库里跑会只扫 1 个 blob 然后说「干净」。
 2. **提交信息也要扫**：泄漏不只在文件里，也在 commit message 里。
 3. **扫描器不能扫到自己**：黑名单里的模式必然命中自己，
-   所以要按**路径**排除自身文件（按 blob sha 排除是无效的——sha 是十六进制）。
+   所以要按**路径**排除自身文件——注意已提交 blob 的标签是 **sha**，
+   按路径排除对它们是**空操作**，必须先建 sha→路径映射。
+4. **黑名单里不放任何个人字面量**：把机器名、盘符根写进代码
+   等于**自己制造泄露**；「用字符串拼接藏起来」更糟——那是**故意让门禁看不见**。
+   个人标识符请用 `--deny <token>` **作为输入**传进来。
+5. **要能看穿字符串拼接**：作者可能把真实 id 写成 `"ab" + "cd"`。
+   所以除了字面量匹配，还要**还原拼接后再比对**（见 _deobfuscate）。
+6. **Windows 上不能静默产出乱码**：stdout 的编码要跟随**控制台码页**
+   （否则 PowerShell 按 cp936 解码 UTF-8 字节 → 中文全乱，且**不报错**）。
 
 用法：
     # 扫当前树 + 全部提交历史 + 全部提交信息
@@ -26,7 +34,10 @@
         --corpus "G:\\path\\to\\conversations.json" \
         --corpus "G:\\path\\to\\share-original.json"
 
-退出码：0 = 干净；1 = 有命中（并打印位置）；2 = 扫描本身没跑成（不是「干净」！）
+    # 把自己的标识符当**输入**传进来（不进仓库）
+    python scripts/desensitize_scan.py --history --deny "我的机器名" --deny "D:\\我的盘"
+
+退出码：0 = 干净；1 = 有命中（并打印位置）；2 = 扫描本身没跑成（**不是「干净」**）
 """
 import argparse
 import json
@@ -51,26 +62,29 @@ LITERAL_PATTERNS = [
     (r'/Users/[A-Za-z0-9_.-]+/', "macOS 用户目录"),
 ]
 
-# 机器名不能用**字面量**写在黑名单里——扫描器会把自己扫出来，
-# 于是这个门禁**永远退出 1**，永远拿不到「干净」。
-# 这里用拼接构造，并按**路径**排除扫描器自身文件。
-_MACHINE_RE = re.compile("<机器名段>" + "<机器名段>" + r"[-_A-Za-z0-9]*")
-LITERAL_PATTERNS.append((_MACHINE_RE.pattern, "机器名"))
-
 # 真实分享链接形态（文档里应用 <id> 占位代替）
 SHARE_LINK_RE = re.compile(r'chat\.deepseek\.com/share/([A-Za-z0-9_-]{16,})')
 
-# 纯 ASCII 的标识符（会话 UUID / 附件 file_id）——字面量扫描必须能抓
+# 纯 ASCII 的标识符（会话 UUID / 附件 file_id）
 UUID_RE = re.compile(
     r'(?<![0-9a-fA-F-])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-'
     r'[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-fA-F-])')
 
-# 扫描器自身：黑名单里必然含有这些模式（按**路径**排除，按 sha 排除无效）
+# 通用机器名**形态**（不含具体人名）：形如 XXX-LAPTOP-20220805
+# ⚠️ 中间段必须是**大写**（LAPTOP / DESKTOP 这种形态）；
+#    否则「UUID 里的 -4444-555555555555」也会被误当成机器名。
+MACHINE_SHAPE_RE = re.compile(r'-\w{3,}-[A-Z]{3,}-\d{6,}\b')
+
+# 扫描器自身：黑名单里必然含有这些模式（按**路径**排除）
 SELF_FILE = "desensitize_scan.py"
 
 # 占位词：出现在命中片段里就说明它是示例，不是真泄露
 PLACEHOLDER_WORDS = ("synthetic", "example", "placeholder", "dummy", "sample",
-                     "<uuid>", "<id>", "xxxx", "00000000")
+                     "<uuid>", "<id>", "xxxx", "00000000", "<model>", "<name>")
+
+# 字符串拼接：可能是「故意把真实 id 藏起来」
+_CONCAT_RE = re.compile(r'"([^"\\]{1,80})"\s*\+\s*"([^"\\]{1,80})"')
+_STR_CONCAT_RE = re.compile(r"'([^'\\]{1,80})'\s*\+\s*'([^'\\]{1,80})'")
 
 
 def _looks_like_placeholder(text):
@@ -94,12 +108,36 @@ def _looks_synthetic_uuid(u):
             return True
     first = parts[0]
     if len(set(first)) == len(first):
-        # 递增序列：01234567 / 12345678 …
         digits = [c for c in first if c.isdigit()]
         if len(digits) == len(first) and all(
                 int(digits[i]) + 1 == int(digits[i + 1]) for i in range(len(digits) - 1)):
             return True
     return False
+
+
+def _deobfuscate(text):
+    """
+    还原「用字符串拼接藏起来」的内容。
+
+    真实 id 写成 `"ab" + "cd" + "ef"` 时，字面量扫描是看不见的——
+    而这恰恰是作者最可能用的藏法（连我都用过一次）。
+    这里把相邻的字面量拼接**还原**出来一起比对。
+
+    只做「相邻两个字面量」的还原（够用了），不做任意求值。
+    """
+    out = [text]
+    for regex in (_CONCAT_RE, _STR_CONCAT_RE):
+        for _ in range(4):      # 多段拼接最多还原 4 轮
+            joined = []
+            changed = False
+            for m in regex.finditer(text):
+                joined.append(m.group(1) + m.group(2))
+                changed = True
+            if not changed:
+                break
+            text = regex.sub(lambda m: '"' + m.group(1) + m.group(2) + '"', text)
+            out.append(text)
+    return "\n".join(out)
 
 
 def run_git(args, cwd=None):
@@ -134,6 +172,24 @@ def repo_root(explicit=None):
         "请用 --repo <路径> 显式指定。".format(here))
 
 
+def _sha_to_path_map(root):
+    """sha → 路径映射，用来排除**扫描器自身的历史版本**。"""
+    sha2path = {}
+    ls = run_git(["ls-files", "-s"], cwd=root)
+    for line in ls.split("\n"):
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        sha = parts[0].split(" ")[0]
+        sha2path.setdefault(sha, parts[1])
+    for line in run_git(["rev-list", "--all", "--objects", "--", SELF_FILE],
+                        cwd=root).split("\n"):
+        sha = line.split(" ")[0].strip()
+        if len(sha) == 40:
+            sha2path.setdefault(sha, SELF_FILE)
+    return sha2path
+
+
 def collect_blobs(history=False, root=None, include_worktree=True):
     """
     返回 [(标识, 文本)]。
@@ -145,6 +201,7 @@ def collect_blobs(history=False, root=None, include_worktree=True):
     """
     root = root or repo_root()
     blobs = []
+    sha2path = _sha_to_path_map(root)
 
     if history:
         out = run_git(["cat-file", "--batch-all-objects",
@@ -159,14 +216,10 @@ def collect_blobs(history=False, root=None, include_worktree=True):
             sha, otype = parts
             if otype != "blob":
                 continue
-            blobs.append((sha, run_git(["cat-file", "-p", sha], cwd=root)))
-
-    # 提交信息：**必须扫**。曾经真实会话的片段就藏在 commit message 里。
-    msgs = run_git(["log", "--all", "--format=%H%n%B%n---"], cwd=root)
-    if msgs.strip():
-        blobs.append(("commit-messages", msgs))
-
-    if not history:
+            # 标签用**路径**（没有路径就用 sha），好让「排除自身」能生效
+            blobs.append((sha2path.get(sha, sha),
+                          run_git(["cat-file", "-p", sha], cwd=root)))
+    else:
         out = run_git(["ls-files"], cwd=root)
         for path in out.split("\n"):
             path = path.strip()
@@ -174,7 +227,12 @@ def collect_blobs(history=False, root=None, include_worktree=True):
                 continue
             sha = run_git(["rev-parse", "HEAD:" + path], cwd=root).strip()
             if sha:
-                blobs.append((sha, run_git(["cat-file", "-p", sha], cwd=root)))
+                blobs.append((path, run_git(["cat-file", "-p", sha], cwd=root)))
+
+    # 提交信息：**必须扫**。曾经真实会话的片段就藏在 commit message 里。
+    msgs = run_git(["log", "--all", "--format=%H%n%B%n---"], cwd=root)
+    if msgs.strip():
+        blobs.append(("commit-messages", msgs))
 
     if include_worktree:
         dirty = run_git(["status", "--porcelain"], cwd=root)
@@ -203,26 +261,38 @@ def collect_blobs(history=False, root=None, include_worktree=True):
     return blobs
 
 
-def literal_scan(blobs):
+def literal_scan(blobs, deny_tokens=()):
     hits = []
     for tag, txt in blobs:
         # 扫描器自身跳过：黑名单里必然含有那些模式（按**路径**判断）
         if SELF_FILE in str(tag):
             continue
+        # 看穿字符串拼接：真实 id 写成 "ab" + "cd" 时字面量扫描是看不见的
+        scan_text = _deobfuscate(txt)
         for pat, label in LITERAL_PATTERNS:
-            for m in re.finditer(pat, txt):
-                hits.append((label, tag, txt[:m.start()].count("\n") + 1,
+            for m in re.finditer(pat, scan_text):
+                hits.append((label, tag, scan_text[:m.start()].count("\n") + 1,
                              m.group(0)[:60]))
-        for m in SHARE_LINK_RE.finditer(txt):
+        for m in SHARE_LINK_RE.finditer(scan_text):
             if _looks_like_placeholder(m.group(0)):
                 continue
             hits.append(("疑似真实分享链接", tag,
-                         txt[:m.start()].count("\n") + 1, m.group(0)[:80]))
-        for m in UUID_RE.finditer(txt):
+                         scan_text[:m.start()].count("\n") + 1, m.group(0)[:80]))
+        for m in UUID_RE.finditer(scan_text):
             if _looks_like_placeholder(m.group(0)) or _looks_synthetic_uuid(m.group(0)):
                 continue
             hits.append(("疑似真实 UUID", tag,
-                         txt[:m.start()].count("\n") + 1, m.group(0)[:60]))
+                         scan_text[:m.start()].count("\n") + 1, m.group(0)[:60]))
+        for m in MACHINE_SHAPE_RE.finditer(scan_text):
+            if _looks_like_placeholder(m.group(0)):
+                continue
+            hits.append(("疑似机器名", tag,
+                         scan_text[:m.start()].count("\n") + 1, m.group(0)[:40]))
+        # 用户显式提供的个人标识符（作为**输入**，不进仓库）
+        for tok in deny_tokens:
+            if tok and tok in scan_text:
+                hits.append(("用户指定的敏感词", tag,
+                             scan_text[:scan_text.find(tok)].count("\n") + 1, tok[:40]))
     return hits
 
 
@@ -253,13 +323,11 @@ def load_corpus_texts(paths, include_assistant=False):
 def _collect_conversation_text(doc, include_assistant=False):
     out = []
     want = ("REQUEST", "RESPONSE") if include_assistant else ("REQUEST",)
-    # 分享原始 JSON: {"data": {"biz_data": {"messages": [...]}}}
     biz = ((doc.get("data") or {}).get("biz_data") or {}) if isinstance(doc, dict) else {}
     for msg in biz.get("messages") or []:
         for fr in msg.get("fragments") or []:
             if fr.get("type") in want and fr.get("content"):
                 out.append(fr["content"])
-    # 账号导出包: [ {id, title, mapping: {...}}, ... ]
     conversations = doc if isinstance(doc, list) else (
         doc.get("conversations") if isinstance(doc, dict) else [])
     for conv in conversations or []:
@@ -302,8 +370,6 @@ def _is_probably_prose(text, min_cjk=6):
     所以用「汉字数量」做粗筛，并额外排除明显的代码。
     """
     cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
-    # ⚠️ 先排代码，再看散文：**中文对话里也常夹代码**（用户贴一段代码来问），
-    # 而代码在仓库源码里必然命中 —— 不先排除就全是噪声。
     if _looks_like_code(text):
         return False
     if cjk >= min_cjk:
@@ -349,8 +415,6 @@ def ngram_scan(blobs, corpus_texts, probe_len=20, step=10, short_len=12):
             if not line:
                 continue
             cjk = sum(1 for ch in line if "一" <= ch <= "鿿")
-            # 含 URL 的行也不当探针：URL 形态（如分享链接格式说明）在
-            # 仓库文档里本来就会出现，命中是**良性**的，只会制造噪声
             if "://" in line or "http" in line:
                 continue
             sizes = []
@@ -365,22 +429,22 @@ def ngram_scan(blobs, corpus_texts, probe_len=20, step=10, short_len=12):
                     continue
                 for i in range(0, len(line) - size + 1, step):
                     w = line[i:i + size]
-                    if not _is_good_probe(w):
-                        continue
-                    probes.add(w)
+                    if _is_good_probe(w):
+                        probes.add(w)
     hits = []
     for tag, txt in blobs:
         if SELF_FILE in str(tag):
             continue
+        scan_text = _deobfuscate(txt)
         for p in probes:
-            if p in txt:
-                line = txt[:txt.find(p)].count("\n") + 1
+            if p in scan_text:
+                line = scan_text[:scan_text.find(p)].count("\n") + 1
                 hits.append(("真实语料片段", tag, line, p[:40]))
     return hits, len(probes)
 
 
 def corpus_identifiers(paths):
-    """从真实语料里抽出**标识符候选**（会话 id / 附件 file_id / 标题）。"""
+    """从真实语料里抽出**标识符候选**（会话 id / 附件 file_id）。"""
     ids = set()
     for p in paths:
         try:
@@ -388,10 +452,11 @@ def corpus_identifiers(paths):
                 doc = json.load(f)
         except Exception:
             continue
-        for m in UUID_RE.finditer(json.dumps(doc, ensure_ascii=False)):
-            ids.add(m.group(0))
-        for m in re.finditer(r'"file_id"\s*:\s*"([^"]+)"',
-                            json.dumps(doc, ensure_ascii=False)):
+        blob = json.dumps(doc, ensure_ascii=False)
+        for m in UUID_RE.finditer(blob):
+            if not _looks_synthetic_uuid(m.group(0)):
+                ids.add(m.group(0))
+        for m in re.finditer(r'"file_id"\s*:\s*"([^"]+)"', blob):
             fid = m.group(1)
             if fid and not _looks_like_placeholder(fid):
                 ids.add(fid)
@@ -403,9 +468,10 @@ def identifier_scan(blobs, ids):
     for tag, txt in blobs:
         if SELF_FILE in str(tag):
             continue
+        scan_text = _deobfuscate(txt)
         for ident in ids:
-            if ident and ident in txt:
-                line = txt[:txt.find(ident)].count("\n") + 1
+            if ident and ident in scan_text:
+                line = scan_text[:scan_text.find(ident)].count("\n") + 1
                 hits.append(("语料标识符", tag, line, ident[:60]))
     return hits
 
@@ -415,6 +481,9 @@ def main(argv=None):
     ap.add_argument("--history", action="store_true", help="连全部提交历史一起扫")
     ap.add_argument("--corpus", action="append", default=[],
                     help="真实语料（导出包或分享原始 JSON），用于 n-gram 探针；可重复")
+    ap.add_argument("--deny", action="append", default=[], metavar="TOKEN",
+                    help="你自己的敏感标识符（机器名/盘符根/项目 id…），"
+                         "作为**输入**传进来，不进仓库；可重复")
     ap.add_argument("--probe-len", type=int, default=20, help="探针窗口长度")
     ap.add_argument("--short-len", type=int, default=12, help="中文行的短探针窗口")
     ap.add_argument("--step", type=int, default=10, help="探针取样步长")
@@ -435,11 +504,10 @@ def main(argv=None):
     print("扫描对象数: {}（{}）".format(
         len(blobs), "含全部历史对象 + 提交信息" if a.history else "当前树 + 提交信息"))
     if not blobs:
-        # 扫到 0 个对象 = 没扫到任何东西，**不能**当成「干净」
         print("ERROR: 一个对象都没扫到——这不表示干净，请检查仓库路径。")
         return 2
 
-    hits = literal_scan(blobs)
+    hits = literal_scan(blobs, deny_tokens=a.deny)
     n_hits, n_probes = [], 0
     id_hits, n_ids = [], 0
     if a.corpus:
@@ -460,6 +528,7 @@ def main(argv=None):
         "repo_root": root,
         "objects_scanned": len(blobs),
         "history": bool(a.history),
+        "deny_tokens": len(a.deny),
         "literal_hits": [{"label": h[0], "at": h[1], "line": h[2], "match": h[3]}
                          for h in hits],
         "ngram_probes": n_probes,
@@ -475,7 +544,7 @@ def main(argv=None):
         if group:
             print("\n⚠️ {}命中 {} 处：".format(label, len(group)))
             for h in group[:20]:
-                print("   [{}] {}:{}  {}".format(h[0], str(h[1])[:12], h[2], h[3]))
+                print("   [{}] {}:{}  {}".format(h[0], str(h[1])[:40], h[2], h[3]))
     if not all_hits:
         print("\n✅ 干净：没有命中")
     if a.out:

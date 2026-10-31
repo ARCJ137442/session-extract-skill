@@ -890,23 +890,37 @@ class TestScannerTrustworthiness(unittest.TestCase):
         self.assertEqual(hits[0][0], "个人机器路径")
 
     def test_scan_detects_planted_uuid(self):
-        # 明显是凑出来的 UUID（段内同字符重复）——扫���器应当**不**报
-        synthetic = "11111111-2222-3333-4444-555555555555"
-        self.assertTrue(self.scan._looks_synthetic_uuid(synthetic),
-                        "段内同字符重复 = 凑出来的 UUID")
+        # ⚠️ UUID **运行时随机生成**：不写任何固定字面量。
+        # 固定字面量（哪怕用拼接藏起来）本身就是泄露——拼接只是让门禁看不见，
+        # 那是**拿门禁当掩护**。要测「随机 UUID 会被抓到」就用真随机。
+        import uuid
+        synthetic = str(uuid.uuid4())
+        self.assertFalse(self.scan._looks_synthetic_uuid(synthetic))
         blobs = [("worktree:x.md", "会话 " + synthetic + " 在这")]
+        self.assertTrue([h for h in self.scan.literal_scan(blobs)
+                         if h[0] == "疑似真实 UUID"], "真实 UUID 必须被抓到")
+
+    def test_synthetic_uuid_not_flagged(self):
+        """明显是凑出来的 UUID 不该报（否则夹具会把门禁弄红）。"""
+        self.assertTrue(self.scan._looks_synthetic_uuid(
+            "11111111-2222-3333-4444-555555555555"))
+        blobs = [("worktree:x.md", "会话 11111111-2222-3333-4444-555555555555 在这")]
         self.assertFalse([h for h in self.scan.literal_scan(blobs)
                           if h[0] == "疑似真实 UUID"],
                          "合成 UUID 不该报（否则夹具会把门禁弄红）")
-        # 但真实随机 UUID 必须报
-        # ⚠️ 这个 UUID 用**拼接构造**：它取自真实会话历史，
-        # 哪怕只是当测试素材，写进仓库也是泄露（扫描器会把它扫出来）。
-        real = ("<会话 id 段>" + "-" + "<会话 id 段>" + "-" + "<会话 id 段>" + "-"
-                + "<会话 id 段>" + "-" + "<会话 id 段>")
-        self.assertFalse(self.scan._looks_synthetic_uuid(real))
-        blobs = [("worktree:x.md", "会话 " + real + " 在这")]
-        self.assertTrue([h for h in self.scan.literal_scan(blobs)
-                         if h[0] == "疑似真实 UUID"], "真实 UUID 必须被抓到")
+
+    def test_deobfuscation_sees_concatenated_literal(self):
+        """
+        守住坑 16：真实 id 写成 `"ab" + "cd"` 时，字面量扫描**看不见**——
+        而这恰恰是作者最可能用的藏法。扫描器必须能**还原拼接**后再比对。
+        """
+        import uuid
+        real = str(uuid.uuid4())
+        parts = [real[i:i + 8] for i in range(0, len(real), 8)]
+        hidden = " + ".join('"%s"' % p for p in parts)
+        blobs = [("worktree:x.md", "会话 " + hidden + " 在这")]
+        hits = [h for h in self.scan.literal_scan(blobs) if h[0] == "疑似真实 UUID"]
+        self.assertTrue(hits, "拼接藏起来的真实 UUID 必须被抓到")
 
     def test_placeholder_path_not_flagged(self):
         """格式说明（`C:\\Users\\<用户名>\\`）不是泄露，不该报。"""
@@ -916,12 +930,24 @@ class TestScannerTrustworthiness(unittest.TestCase):
                          "占位形式不该报")
 
     def test_scanner_excludes_itself(self):
-        """扫描器自身文件不得被自己的黑名单扫出来。"""
-        blobs = [(self.scan.SELF_FILE, "<机器名段>" + "<机器名段>-LAPTOP"),
+        """扫描器自身文件不得被自己的黑名单扫出来（按**路径**排除）。"""
+        import random
+        name = "HOST-MYPC-LAPTOP-" + str(random.randint(10000000, 99999999))
+        blobs = [("worktree:" + self.scan.SELF_FILE, "机器名形态 " + name),
                   ("worktree:other.py", "正常内容")]
         hits = self.scan.literal_scan(blobs)
-        self.assertFalse([h for h in hits if "机器名" in h[0]],
+        self.assertFalse([h for h in hits if h[0] == "疑似机器名"],
                          "扫描器自身必须被排除")
+
+    def test_machine_shape_detected(self):
+        """通用机器名形态（不含具体人名）应当被抓到。"""
+        import random
+        # ⚠️ 机器名**运行时生成**：写死字面量等于在仓库里留一个机器名形态
+        name = "HOST-MYPC-LAPTOP-" + str(random.randint(10000000, 99999999))
+        blobs = [("worktree:x.md", "机器 " + name)]
+        hits = self.scan.literal_scan(blobs)
+        self.assertTrue([h for h in hits if h[0] == "疑似机器名"],
+                        "机器名形态必须被抓到")
 
     def test_commit_messages_are_scanned(self):
         """提交信息也是泄漏面——必须纳入扫描对象。"""

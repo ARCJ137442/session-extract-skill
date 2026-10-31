@@ -18,7 +18,56 @@ DeepSeek 两条路径（账号导出包 / 分享链接）共用的归一规则�
 「同一事实两处实现」是本 skill 历史上已经踩过的坑（merge 的 url 键
 与 file_id 归一化不同步）。
 """
+import os
 import re
+import sys
+
+
+def console_encoding():
+    """
+    stdout 该用什么编码。
+
+    ⚠️ **不要在 Windows 上钉死 UTF-8**：PowerShell 5.1 读取子进程 stdout 时
+    按 `[Console]::OutputEncoding`（控制台码页，中文默认 cp936）**解码**。
+    子进程写 UTF-8 字节 → 被按 GBK 解码 → **中文全乱码，而且不报错**
+    （静默损坏比崩溃更危险）。
+
+    所以跟随**控制台真实码页**：
+    - Windows：用 `GetConsoleOutputCP()` 拿真实码页（chcp 65001 → UTF-8）
+    - 其他：UTF-8
+
+    需要**字节级保真**的产物请用 `--out` / `--outdir`——
+    文件侧显式 `encoding="utf-8"`，不受控制台码页影响。
+    """
+    if os.name != "nt":
+        return "utf-8"
+    try:
+        import ctypes
+        cp = ctypes.windll.kernel32.GetConsoleOutputCP()
+        if cp and cp != 0:
+            for enc in ("utf-8", "gbk", "cp" + str(cp)):
+                try:
+                    "x".encode(enc)
+                    return enc
+                except LookupError:
+                    continue
+    except Exception:
+        pass
+    return "utf-8"
+
+
+def setup_streams():
+    """把 stdout/stderr 的编码设成控制台码页（错误字符用 replace 兜底）。"""
+    enc = console_encoding()
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:
+            continue
+        try:
+            stream.reconfigure(encoding=enc, errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    return enc
 
 # 分享链接侧的占位符标题。DeepSeek 前端可能改文案/语言，所以用名单 + 归一比较，
 # 而不是「等于某一个字符串」。

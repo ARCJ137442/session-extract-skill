@@ -61,6 +61,8 @@ from collections import Counter
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 try:
     from deepseek_common import (
+        console_encoding,
+        setup_streams,
         is_placeholder_title,
         normalize_title,
         norm_url,
@@ -74,15 +76,10 @@ except ImportError:  # pragma: no cover - 极少见：模块文件缺失
         "the two DeepSeek paths must share one normalisation rule set."
     )
 
-# stdout 编码钉死：Windows 上 stdout 被重定向到文件/管道时编码会从
-# UTF-8 掉回 locale（中文 Windows = cp936），而本模块的输出含
-# 「⚠️」(U+26A0+VS16) 等非 cp936 字符 —— 直接 UnicodeEncodeError 崩掉。
-# 写文件的地方本来就显式指定了 encoding="utf-8"，stdout 之前是漏的。
-for _stream in ("stdout", "stderr"):
-    try:
-        getattr(sys, _stream).reconfigure(encoding="utf-8")
-    except (AttributeError, ValueError):  # pragma: no cover - 非标准流
-        pass
+# stdout 编码跟随**控制台码页**（见 deepseek_common.console_encoding 的说明）：
+# 钉死 UTF-8 反而会让 PowerShell 按 cp936 解码 → 中文静默乱码。
+# 需要字节级保真的产物请用 --out / --outdir（文件侧显式 utf-8）。
+setup_streams()
 
 PLATFORM = "deepseek-web-share"
 SCHEMA = "rescued-session/v1"

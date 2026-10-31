@@ -223,7 +223,7 @@ python3 "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <
 
 1. **容器键名不同** —— 导出包是 `raw_mapping`，分享链接是 `raw_messages`（它没有聊天树）。并集代码要**同时认这两个键**。
 2. **`TOOL_OPEN` 载荷差异是来源差异** —— 分享侧有 `result{url,title,snippet}`，导出侧根本没导出。不是 bug。
-3. **`[!reference:N]` 必须先归一再比正文** —— 分享侧剥离了行内引用标记（引用关系移到 `references` 数组），导出侧保留着。实测 48 个共有节点里**近一半**报文本差异（按 REQUEST/RESPONSE 口径复算是 21 个，按全类型口径是 24 个——**数字随口径变，结论不变**），差异**全是这个原因**，归一后相似度 0.9592–0.9913。
+3. **`[!reference:N]` 必须先归一再比正文** —— 分享侧剥离了行内引用标记（引用关系移到 `references` 数组），导出侧保留着。实测 48 个共有节点里**近一半**报文本差异（按 REQUEST/RESPONSE 口径复算是 21 个，按全类型口径是 24 个——**数字随口径变，结论不变**），差异**全是这个原因**：未归一时相似度 0.9592–0.9913，**归一后 21/21 完全相同**。
 
 `transcript[].sources[]` 与 `_meta.sources[]` 已标注每个节点来自哪条路径，并集时按它标注出处。
 
@@ -519,7 +519,7 @@ python "[path-to-skill]/scripts/desensitize_scan.py" --history `
 | **DeepSeek `TOOL_OPEN`/`TOOL_FIND` 载荷未导出** | 这两类 fragment 只有 `type`，没有 `content`/`results` | 如实告知用户这是导出本身的信息损失，无法补救；不要假装"内容都在" |
 | **DeepSeek 附件无法打捞** | 导出包只记录附件的 `file_id` / `file_name` / `file_size`，**图片本体不在包内**，zip 里也没有附件目录（只有 `user.json` + `conversations.json` 两个文件） | 导出包路径只能产出「附件清单 + 每张图对应的提问」并标注 `bytes_available_in_export: false`；**要字节就换分享链接路径**（`--platform deepseek-share`），它能直下原图 |
 | **单一来源 ≠ 完整历史** | 导出包是某时刻的快照，分享链接只有最终态（用户编辑/删掉的中间轮次不在其中）；两边各有独占内容 | 跨源求**并集**，并用 `transcript[].sources[]` / `_meta.sources[]` **标注每个节点的出处**，别假装单一来源就是全的 |
-| **跨源比对正文前必须归一** | 分享侧剥离了 `[!reference:N]` 行内引用标记（引用关系移到 `references` 数组），导出侧保留着 | 归一后再比。实测 48 个共有节点里**近一半**报文本差异（数字随口径变，结论不变），差异**全是这个原因**，归一后相似度 0.9592–0.9913 |
+| **跨源比对正文前必须归一** | 分享侧剥离了 `[!reference:N]` 行内引用标记（引用关系移到 `references` 数组），导出侧保留着 | 归一后再比。实测 48 个共有节点里**近一半**报文本差异（数字随口径变，结论不变），差异**全是这个原因**：未归一时相似度 0.9592–0.9913，**归一后完全相同** |
 | **资源 URL 不在 DOM 里** | 站点 API 返回了资源路径（如 `signed_path`）但页面**完全不渲染**它——DOM 里没有节点、resource timeline 里也没有请求 | 去前端 bundle 反查 URL 构造函数：在 `main.<hash>.js` 里 `grep -o -E ".{150}signedPath.{250}"`，顺藤摸瓜找到域名与路径前缀的拼接逻辑（DeepSeek 是 `files.deepseeksvc.com` + `/api` + `signed_path` + `?ty=p`），再验证 `Content-Type` 是 `image/*` 而非 `text/html`。**比在 DOM 里瞎找快一个数量级** |
 | **失效端点返回 200 + SPA HTML** | 老接口 `/api/v0/share?share_id=` 返回 **HTTP 200**，内容却是首页 HTML | 显式校验响应体：JSON 前缀不是 `{` 就直接报错，别把 HTML 当 JSON 解析 |
 

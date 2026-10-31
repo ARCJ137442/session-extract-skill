@@ -151,7 +151,9 @@ python "[path-to-skill]/scripts/session_extract.py" --merge <导出包产物.jso
 - Windows 用 `python`，macOS/Linux 用 `python3`。
 - `python -I`（隔离模式）下解释器不会把脚本目录放进 `sys.path`，脚本已显式兜底。
 - 所有文件读取统一 `encoding='utf-8'`；路径统一用 `os.path.expanduser()` / `os.path.join()`。
-- stdout 输出统一钉死 UTF-8（Windows 重定向到文件时 locale 编码会吞掉非 ASCII 字符）。
+- stdout 的编码**跟随控制台码页**（Windows 上 PowerShell 按 `[Console]::OutputEncoding`
+  解码子进程输出；钉死 UTF-8 反而会被按 cp936 解码 → 中文静默乱码）。
+  **要字节级保真的产物请用 `--out` / `--outdir`**（文件侧显式 UTF-8，不受码页影响）。
 - **脱敏**：脚本与文档里不写死个人机器路径、真实会话内容、真实标题与真实 share_id；
   回归测试一律用合成数据。
 - 详细的坑、原则、实战案例见 `SKILL.md`。
