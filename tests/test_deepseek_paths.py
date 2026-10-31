@@ -1160,8 +1160,13 @@ class TestBareShareIdDetection(unittest.TestCase):
     def test_decoded_candidates_are_checked(self):
         """chr() / base64 藏起来的真实 id 也必须被抓到。"""
         import base64
+        import random
+        import string
         import desensitize_scan
-        ident = "<合成 id>"
+        # 真实分享 id 约 19 位；运行时随机生成，既贴近真实输入形态，
+        # 又不会在仓库里留下一个“长得像真 id”的字面量。
+        ident = "".join(random.choice(string.ascii_lowercase + string.digits)
+                        for _ in range(19))
         b64 = base64.b64encode(ident.encode()).decode()
         blobs = [("worktree:x.py", 'x = "' + b64 + '"')]
         cands = desensitize_scan._obfuscated_candidates(blobs[0][1])
