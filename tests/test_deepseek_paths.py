@@ -1066,6 +1066,8 @@ class TestCorpusProbes(unittest.TestCase):
 
     def test_english_probe_allowed(self):
         import desensitize_scan
+        # ⚠️ 用**自己编的**英文句子：别把真实语料里的短语抄进测试——
+        # 那等于把语料原文写进仓库（我犯过一次，扫描器当场抓出来）。
         self.assertTrue(desensitize_scan._is_good_probe(
-            "【合成样例】探针样句 【合成样例】发布说明片段"))
+            "upload silently failed after restart"))
         self.assertFalse(desensitize_scan._is_good_probe("   }  "))
