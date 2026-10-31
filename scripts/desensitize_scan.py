@@ -69,9 +69,12 @@ SHARE_LINK_RE = re.compile(r'chat\.deepseek\.com/share/([A-Za-z0-9_-]{16,})')
 # （`_meta.source.share_id` / `payload.id`），不带域名。
 # 只匹配完整 URL 的规则对它**完全失明**——而「真实分享 id 不得出现」
 # 恰恰是本仓库最重要的一条红线。所以按**上下文**抓：
-# 字段名（share_id / shareId / share_url）后面跟着一串 token → 报。
+# 字段名（share_id / shareId / share_url）后面跟着一个**带引号**的 token。
+# ⚠️ 必须要求引号：代码里的 `share_id = normalise_share_id(...)`
+#    会被误判成「分享 id = normalise_share_id」。
 SHARE_ID_CTX_RE = re.compile(
-    r'(?:share_id|shareId|share_url|shareUrl)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]{16,})')
+    r'(?:share_id|shareId|share_url|shareUrl)["\']?\s*[:=]\s*'
+    r'["\']([A-Za-z0-9_-]{16,})["\']')
 
 # 纯 ASCII 的标识符（会话 UUID / 附件 file_id）
 UUID_RE = re.compile(

@@ -1138,8 +1138,14 @@ class TestBareShareIdDetection(unittest.TestCase):
     """
 
     def test_bare_share_id_detected(self):
+        import random
+        import string
         import desensitize_scan
-        blobs = [("worktree:x.json", '{"share_id": "<合成 id>"}')]
+        # ⚠️ 分享 id **运行时随机生成**：写死字面量等于在仓库里留一个
+        # 「长得像真分享 id」的字符串（扫描器会当场把它抓出来）。
+        ident = "".join(random.choice(string.ascii_lowercase + string.digits)
+                        for _ in range(19))
+        blobs = [("worktree:x.json", '{"share_id": "' + ident + '"}')]
         hits = [h for h in desensitize_scan.literal_scan(blobs)
                 if "分享 id" in h[0]]
         self.assertTrue(hits, "裸 share id 必须被抓到")
