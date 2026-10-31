@@ -750,8 +750,23 @@ class TestDesensitizeScanner(unittest.TestCase):
         """格式说明 `/share/<id>` 合法；`/share/<真实id>` 才该报。"""
         self.assertIsNone(self.scan.SHARE_LINK_RE.search("https://chat.deepseek.com/share/<18位ID>"))
         self.assertIsNone(self.scan.SHARE_LINK_RE.search("https://chat.deepseek.com/share/<id>"))
+        # ⚠️ 必须用**合成 id**：真实 share id 指向一个匿名可读的私人会话，
+        # 把它写进公开仓库等于主动公开。测试素材一律合成。
         self.assertIsNotNone(self.scan.SHARE_LINK_RE.search(
-            "https://chat.deepseek.com/share/<分享 id>"))
+            "https://chat.deepseek.com/share/synthetic0share0id0abc"))
+
+    def test_this_file_contains_no_real_share_id(self):
+        """
+        自检：本文件里不得出现任何**真实**分享 id（合成 id 除外）。
+        写测试时顺手抄一个真 id 进断言，是最容易犯也最致命的脱敏事故。
+        """
+        here = os.path.abspath(__file__)
+        with open(here, encoding="utf-8") as f:
+            text = f.read()
+        import re
+        for m in re.finditer(r'chat\.deepseek\.com/share/([A-Za-z0-9_-]{16,})', text):
+            self.assertIn("synthetic", m.group(1),
+                          "测试文件里出现了疑似真实的分享 id: {}".format(m.group(1)))
 
 
 

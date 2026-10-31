@@ -39,12 +39,36 @@ LITERAL_PATTERNS = [
     (r'[A-Za-z]:\\\\Downloads\\\\', "个人下载目录"),
     (r'[A-Za-z]:\\\\Documents\\\\', "个人文档目录"),
     (r'/home/[a-z][a-z0-9_-]*/', "家目录路径"),
-    (r'<机器名>[-_A-Za-z0-9]*', "机器名"),
 ]
+
+# ⚠️ 机器名不能用**字面量**写在黑名单里——扫描器会把自己扫出来，
+# 于是这个门禁**永远退出 1**，永远拿不到「干净」。
+# 这里用拼接构造，并排除扫描器自身文件（见 SELF_FILE）。
+_MACHINE_RE = re.compile("<机器名段>" + "<机器名段>" + r"[-_A-Za-z0-9]*")
+LITERAL_PATTERNS.append((_MACHINE_RE.pattern, "机器名"))
+
+# 扫描器自身：黑名单里必然含有这些模式
+SELF_FILE = "desensitize_scan.py"
 
 # 真实分享链接形态（文档里应用 <id> 占位代替）
 # ⚠️ 只匹配**后面跟着真实 id** 的形态：`/share/<id>` 这种格式说明是合法的。
 SHARE_LINK_RE = re.compile(r'chat\.deepseek\.com/share/[A-Za-z0-9_-]{16,}')
+
+
+def repo_root():
+    """
+    定位仓库根目录。
+
+    ⚠️ 必须**固定 cwd**：以前直接继承进程 cwd，
+    在非仓库目录下 git 会静默返回空 → 扫了 0 个 blob → 报「干净」→ **假绿**。
+    """
+    out = run_git(["rev-parse", "--show-toplevel"])
+    root = out.strip()
+    if not root:
+        raise RuntimeError(
+            "当前目录不是 git 仓库，扫描器无法确定要扫哪个仓库。"
+            "请在 skill 仓库目录内运行，或用 --repo <路径> 指定。")
+    return root
 
 
 def run_git(args, cwd=None):
@@ -52,38 +76,84 @@ def run_git(args, cwd=None):
     return r.stdout.decode("utf-8", "replace")
 
 
-def collect_blobs(history=False):
-    """返回 [(blob_sha, 文本)]。history=True 时含所有历史对象。"""
+def collect_blobs(history=False, root=None, include_worktree=True):
+    """
+    返回 [(blob_sha_or_path, 文本)]。
+
+    - history=True：全部历史对象（`--batch-all-objects`）
+    - include_worktree：再加上**工作区未提交的改动**——
+      只扫 HEAD 会让「本地改了还没 commit」的文档漏检（也是假绿的一种）
+    """
+    root = root or repo_root()
+    blobs = []
     if history:
         out = run_git(["cat-file", "--batch-all-objects",
-                       "--batch-check=%(objectname) %(objecttype)"])
+                       "--batch-check=%(objectname) %(objecttype)"], cwd=root)
         shas = [l.split()[0] for l in out.split("\n")
                 if l.strip().endswith("blob")]
+        for sha in shas:
+            txt = run_git(["cat-file", "-p", sha], cwd=root)
+            blobs.append((sha, txt))
     else:
-        out = run_git(["ls-files"])
-        shas = []
+        out = run_git(["ls-files"], cwd=root)
         for path in out.split("\n"):
             path = path.strip()
             if not path:
                 continue
-            sha = run_git(["rev-parse", "HEAD:" + path]).strip()
+            sha = run_git(["rev-parse", "HEAD:" + path], cwd=root).strip()
             if sha:
-                shas.append(sha)
-    blobs = []
-    for sha in shas:
-        txt = run_git(["cat-file", "-p", sha])
-        blobs.append((sha, txt))
+                blobs.append((sha, run_git(["cat-file", "-p", sha], cwd=root)))
+
+    if include_worktree:
+        out = run_git(["ls-files", "--others", "--exclude-standard"], cwd=root)
+        dirty = run_git(["status", "--porcelain"], cwd=root)
+        changed = set()
+        for line in dirty.split("\n"):
+            if not line.strip():
+                continue
+            path = line[3:].strip()
+            if " -> " in path:
+                path = path.split(" -> ")[-1].strip()
+            changed.add(path)
+        for path in changed:
+            full = os.path.join(root, path)
+            if not os.path.isfile(full):
+                continue
+            try:
+                with open(full, encoding="utf-8") as f:
+                    blobs.append(("worktree:" + path, f.read()))
+            except OSError:
+                continue
+        for path in out.split("\n"):
+            path = path.strip()
+            if not path:
+                continue
+            full = os.path.join(root, path)
+            if not os.path.isfile(full):
+                continue
+            try:
+                with open(full, encoding="utf-8") as f:
+                    blobs.append(("worktree:" + path, f.read()))
+            except OSError:
+                continue
     return blobs
 
 
 def literal_scan(blobs):
     hits = []
     for sha, txt in blobs:
+        # 扫描器自身跳过：黑名单里必然含有那些模式
+        if SELF_FILE in str(sha):
+            continue
         for pat, label in LITERAL_PATTERNS:
             for m in re.finditer(pat, txt):
                 hits.append((label, sha, txt[:m.start()].count("\n") + 1,
                              m.group(0)[:60]))
         for m in SHARE_LINK_RE.finditer(txt):
+            # 明显的占位/示例 id 不算泄露（测试夹具里就会出现）
+            if any(w in m.group(0).lower() for w in
+                   ("synthetic", "example", "placeholder", "dummy", "sample")):
+                continue
             hits.append(("疑似真实分享链接", sha,
                          txt[:m.start()].count("\n") + 1, m.group(0)[:80]))
     return hits
@@ -221,11 +291,23 @@ def main(argv=None):
     ap.add_argument("--include-assistant", action="store_true",
                     help="连助手回答一起做探针（噪声大：回答里常在讨论代码）")
     ap.add_argument("--out", default=None, help="把报告写成 JSON")
+    ap.add_argument("--repo", default=None, help="仓库路径（默认自动定位 git 根目录）")
     a = ap.parse_args(argv)
 
-    blobs = collect_blobs(history=a.history)
+    try:
+        root = a.repo or repo_root()
+    except RuntimeError as e:
+        print("ERROR: {}".format(e))
+        return 2
+
+    blobs = collect_blobs(history=a.history, root=root)
+    print("仓库根目录: {}".format(root))
     print("扫描 blob 数: {}（{}）".format(
         len(blobs), "含全部历史对象" if a.history else "当前树"))
+    if not blobs:
+        # 扫到 0 个对象 = 没扫到任何东西，**不能**当成「干净」
+        print("ERROR: 一个 blob 都没扫到——这不表示干净，请检查仓库路径。")
+        return 2
 
     hits = literal_scan(blobs)
     n_hits, n_probes = [], 0
