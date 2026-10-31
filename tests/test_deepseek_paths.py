@@ -932,7 +932,7 @@ class TestScannerTrustworthiness(unittest.TestCase):
     def test_scanner_excludes_itself(self):
         """扫描器自身文件不得被自己的黑名单扫出来（按**路径**排除）。"""
         import random
-        name = "HOST-MYPC-LAPTOP-" + str(random.randint(10000000, 99999999))
+        name = "WORKSTATION-LAPTOP-" + str(random.randint(10000000, 99999999))
         blobs = [("worktree:" + self.scan.SELF_FILE, "机器名形态 " + name),
                   ("worktree:other.py", "正常内容")]
         hits = self.scan.literal_scan(blobs)
@@ -943,7 +943,7 @@ class TestScannerTrustworthiness(unittest.TestCase):
         """通用机器名形态（不含具体人名）应当被抓到。"""
         import random
         # ⚠️ 机器名**运行时生成**：写死字面量等于在仓库里留一个机器名形态
-        name = "HOST-MYPC-LAPTOP-" + str(random.randint(10000000, 99999999))
+        name = "WORKSTATION-LAPTOP-" + str(random.randint(10000000, 99999999))
         blobs = [("worktree:x.md", "机器 " + name)]
         hits = self.scan.literal_scan(blobs)
         self.assertTrue([h for h in hits if h[0] == "疑似机器名"],

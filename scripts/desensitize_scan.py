@@ -75,16 +75,18 @@ UUID_RE = re.compile(
 # ⚠️ 必须覆盖真实形态：**三段** `名称-LAPTOP-20220805`
 #    （以前只匹配四段 `-A-B-数字`，真实机器名全是三段 → 整条规则失明，
 #      而自带测试用的是四段夹具，于是它一直「通过」）
-MACHINE_SHAPE_RE = re.compile(
-    r'(?:\w{3,}-)?[A-Z]{3,}-\d{6,8}\b'          # NAME-LAPTOP-20220805 / LAPTOP-20220805
-    r'|(?:\w{3,}-){2}[A-Z]{3,}-\d{6,8}\b')     # HOST-NAME-LAPTOP-20220805
+# ⚠️ 要求**至少三段**（名称-LAPTOP-日期）：真实机器名是这个形态；
+#    而「LAPTOP-20220805」这种两段写法在文档里通常是**举例**，
+#    按它匹配会把一堆说明文字当成机器名。
+MACHINE_SHAPE_RE = re.compile(r'(?:\w{3,}-){1,3}[A-Z]{3,}-\d{6,8}\b')
 
 # 扫描器自身：黑名单里必然含有这些模式（按**路径**排除）
 SELF_FILE = "desensitize_scan.py"
 
 # 占位词：出现在命中片段里就说明它是示例，不是真泄露
 PLACEHOLDER_WORDS = ("synthetic", "example", "placeholder", "dummy", "sample",
-                     "<uuid>", "<id>", "xxxx", "00000000", "<model>", "<name>")
+                     "<uuid>", "<id>", "xxx", "xxxx", "00000000", "<model>", "<name>",
+                     "mypc", "name-laptop", "host-name")
 
 # 字符串拼接：可能是「故意把真实 id 藏起来」
 _CONCAT_RE = re.compile(r'"([^"\\]{1,80})"\s*\+\s*"([^"\\]{1,80})"')
@@ -177,20 +179,40 @@ def repo_root(explicit=None):
 
 
 def _sha_to_path_map(root):
-    """sha → 路径映射，用来排除**扫描器自身的历史版本**。"""
+    """
+    sha → 路径映射，用来排除**扫描器自身的历史版本**。
+
+    ⚠️ 只用 `git ls-files -s`（当前树）是不够的：历史版本的 blob sha
+    不在里面 → 排除对它们**无效** → 扫描器扫自己 → 门禁永远红。
+    所以再用 `git log --all -- <自身路径>` 取出所有改过它的提交，
+    逐个 `rev-parse <commit>:<路径>` 拿到**该版本**的 blob sha。
+    """
     sha2path = {}
     ls = run_git(["ls-files", "-s"], cwd=root)
     for line in ls.split("\n"):
         parts = line.split("\t")
         if len(parts) != 2:
             continue
-        sha = parts[0].split(" ")[0]
-        sha2path.setdefault(sha, parts[1])
-    for line in run_git(["rev-list", "--all", "--objects", "--", SELF_FILE],
-                        cwd=root).split("\n"):
-        sha = line.split(" ")[0].strip()
+        # "100644 <sha> 0\t<path>" —— sha 是**第二个**字段，取第一个会拿到 mode
+        fields = parts[0].split()
+        if len(fields) < 2:
+            continue
+        sha2path.setdefault(fields[1], parts[1])
+    # 本脚本自身的历史版本
+    # ⚠️ pathspec 必须是**仓库相对路径**（scripts/xxx.py），
+    # 只给文件名在 git log 里匹配不到任何东西 → 排除对历史版本无效
+    # → 扫描器扫自己 → 门禁永远红。
+    try:
+        self_path = os.path.relpath(os.path.abspath(__file__), root)
+    except ValueError:
+        self_path = SELF_FILE
+    # ⚠️ git 的 pathspec 要**正斜杠**（Windows 的反斜杠匹配不到任何东西）
+    self_path = self_path.replace("\\", "/")
+    for commit in run_git(["log", "--all", "--format=%H", "--", self_path],
+                          cwd=root).split():
+        sha = run_git(["rev-parse", "{}:{}".format(commit, self_path)], cwd=root).strip()
         if len(sha) == 40:
-            sha2path.setdefault(sha, SELF_FILE)
+            sha2path.setdefault(sha, self_path)
     return sha2path
 
 
