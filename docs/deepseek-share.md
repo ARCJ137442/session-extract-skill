@@ -28,7 +28,7 @@
 - 全部**无需登录**，只需常规浏览器 `User-Agent` + `Referer: https://chat.deepseek.com/`。
 - ⚠️ **`/api/v0/share?share_id=` 是失效端点**：返回 200，但内容是 SPA 首页 HTML。
   脚本里显式拦了这个情况（见 `fetch_share()` 的 JSON 前缀检查），别改回老接口。
-- 分享链接形态：`https://chat.deepseek.com/share/<24位ID>`，ID 形如 `<18位随机字符串>`。
+- 分享链接形态：`https://chat.deepseek.com/share/<ID>`，ID 是一串**小写字母+数字**的随机串（实测约 19 位，位数不是稳定契约，别按长度做校验）。
 
 ## 三、⚠️ 通用套路：附件 URL 不在 DOM 里时，去前端 bundle 反查
 
@@ -198,16 +198,16 @@ https://example.org/docs/paper.pdf#1#1#1
 
 ```bash
 # 可读全文（提问 / 搜索结果 / 回复，跳过 THINK 链）
-python scripts/extract_deepseek_share.py <share_id | share_url> --print --title "<真实会话名>"
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id | share_url> --print --title "<真实会话名>"
 
 # 机器可读：rescued-session/v1 产物 JSON（含 _meta.source 溯源 + _meta.verification 自证）
-python scripts/extract_deepseek_share.py <share_id | share_url> --format json
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id | share_url> --format json
 
 # ⭐ ChatGPT 网页版可直接上传（messages 数组 + 引用映射 + 来源清单）
-python scripts/extract_deepseek_share.py <share_id | share_url> --format openai --title "<真实会话名>"
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id | share_url> --format openai --title "<真实会话名>"
 
 # 分享 API 原始 JSON
-python scripts/extract_deepseek_share.py <share_id | share_url> --format raw
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id | share_url> --format raw
 ```
 
 | `--format` | stdout 内容 | 落盘 |
@@ -230,11 +230,11 @@ python scripts/extract_deepseek_share.py <share_id | share_url> --format raw
 
 ```bash
 # 独立用（模块自带 CLI）
-python scripts/extract_deepseek_share.py <share_id | share_url> \
+python "[path-to-skill]/scripts/extract_deepseek_share.py" <share_id | share_url> \
     --outdir <dir> [--title "<真实会话名>"] [--markdown] [--verify]
 
 # 统一调度（由 session_extract.py 接线）
-python scripts/session_extract.py --platform deepseek-share <share_id | share_url> \
+python "[path-to-skill]/scripts/session_extract.py" --platform deepseek-share <share_id | share_url> \
     [--outdir <dir>] [--markdown]
 ```
 
@@ -246,7 +246,7 @@ python scripts/session_extract.py --platform deepseek-share <share_id | share_ur
 ### 6.3 跨源并集后的门禁自检
 
 ```bash
-python scripts/verify_merged_deepseek.py --export <导出包产物.json> \
+python "[path-to-skill]/scripts/verify_merged_deepseek.py" --export <导出包产物.json> \
     --share <分享链接原始.json> --merged <并集产物.json> [--outdir <目录>]
 ```
 

@@ -620,7 +620,9 @@ def main(argv=None):
                           e_open, s_open, m_open, checks)
     open(md_path, "w", encoding="utf-8").write(report)
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump({"merged": args.merged, "checks": checks,
+        # ⚠️ 只留**文件名**，不写绝对路径：这份报告是要被转手分享的，
+        # 绝对路径会泄露使用者的目录布局（与产物 _meta.source.file 同一原则）。
+        json.dump({"merged": os.path.basename(args.merged), "checks": checks,
                    "ok": all(c["ok"] for c in checks.values())},
                   f, ensure_ascii=False, indent=2)
 

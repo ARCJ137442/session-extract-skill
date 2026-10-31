@@ -772,3 +772,73 @@ class TestDesensitizeScanner(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ============================================================
+# Claude Code 会话：元信息必须从「任意事件」补齐
+# ============================================================
+
+class TestClaudeSessionMetadata(unittest.TestCase):
+    """
+    守住坑 14：首行不是消息的真实会话，元信息不能丢。
+
+    实测 143 个真实 Claude Code 会话里 **59 个（41%）的首行不是消息**
+    （是 mode / last-prompt / ai-title 这类旁路记录），而 cwd / gitBranch /
+    version 往往就挂在那些旁路事件上。
+    只从「首条 user 消息」取元信息 → 一半会话的 SessionID/CWD 全是 N/A。
+    （与平台探测是同一个根因：首行不是消息。）
+    """
+
+    def _write(self, tmpdir, name, lines):
+        path = os.path.join(tmpdir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            for l in lines:
+                f.write(json.dumps(l, ensure_ascii=False) + "\n")
+        return path
+
+    def test_metadata_from_side_records(self):
+        import tempfile
+        import extract_claude
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "s.jsonl", [
+                {"type": "mode", "sessionId": "sid-1", "mode": "default"},
+                {"type": "last-prompt", "sessionId": "sid-1"},
+                {"type": "attachment", "sessionId": "sid-1",
+                 "cwd": "/tmp/proj", "gitBranch": "main", "version": "1.2.3"},
+                {"type": "user", "sessionId": "sid-1",
+                 "message": {"role": "user", "content": "【合成样例】你好"},
+                 "timestamp": "2026-01-01T00:00:00Z"},
+            ])
+            r = extract_claude.extract(p)
+            si = r["session_info"]
+            self.assertEqual(si.get("sessionId"), "sid-1")
+            self.assertEqual(si.get("cwd"), "/tmp/proj")
+            self.assertEqual(si.get("branch"), "main")
+            self.assertEqual(si.get("version"), "1.2.3")
+
+    def test_metadata_merge_does_not_overwrite(self):
+        import tempfile
+        import extract_claude
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "s2.jsonl", [
+                {"type": "attachment", "sessionId": "sid-2", "cwd": "/tmp/a"},
+                {"type": "attachment", "sessionId": "sid-2", "cwd": "/tmp/b",
+                 "gitBranch": "dev"},
+            ])
+            r = extract_claude.extract(p)
+            si = r["session_info"]
+            self.assertEqual(si.get("cwd"), "/tmp/a", "先到的值不该被覆盖")
+            self.assertEqual(si.get("branch"), "dev", "后来的字段仍要补上")
+
+    def test_bom_file_is_readable(self):
+        """带 UTF-8 BOM 的 jsonl 不该报 'Unexpected UTF-8 BOM'。"""
+        import tempfile
+        import extract_claude
+        with tempfile.TemporaryDirectory() as td:
+            path = os.path.join(td, "bom.jsonl")
+            with open(path, "w", encoding="utf-8-sig") as f:
+                f.write(json.dumps({"type": "user", "sessionId": "s3",
+                                    "message": {"role": "user", "content": "x"}},
+                                   ensure_ascii=False) + "\n")
+            r = extract_claude.extract(path)
+            self.assertEqual(r["session_info"].get("sessionId"), "s3")

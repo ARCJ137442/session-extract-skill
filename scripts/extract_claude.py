@@ -21,16 +21,25 @@ def extract(filepath):
     """
     result = _empty_result()
 
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, "r", encoding="utf-8-sig") as f:
         first_line = True
+        meta_scanned = 0
         for line in f:
             import json
             obj = json.loads(line)
             t = obj.get("type", "")
 
-            if first_line and t == "user":
+            # ⚠️ 会话元信息**不能只看首条 user 消息**。
+            # 实测 143 个真实 Claude Code 会话里 **59 个（41%）的首行不是消息**
+            # （是 mode / last-prompt / ai-title / attachment 这类旁路记录），
+            # 而 cwd / gitBranch / version 往往出现在**旁路事件**上——
+            # 于是这些会话的 SessionID / CWD / Branch / Version 全是 N/A。
+            # （与平台探测是同一个根因：首行不是消息。）
+            # 做法：前若干条事件里**持续补齐**元信息，谁有算谁的
+            #（不能因为拿到了 sessionId 就停——cwd / gitBranch 可能在更后面才出现）
+            if meta_scanned < 200:
+                meta_scanned += 1
                 _parse_session_info(obj, result)
-                first_line = False
 
             if t == "user":
                 _parse_user(obj, result)
@@ -74,14 +83,20 @@ def _empty_result():
 
 
 def _parse_session_info(obj, result):
-    """首条 user 消息 → 会话元信息。"""
-    result["session_info"] = {
-        "sessionId": obj.get("sessionId", ""),
-        "cwd": obj.get("cwd", ""),
-        "branch": obj.get("gitBranch", ""),
-        "version": obj.get("version", ""),
-        "entrypoint": obj.get("entrypoint", ""),
-    }
+    """
+    从**任意事件**补齐会话元信息。
+
+    ⚠️ 只补**空缺**，不覆盖已有值——不同事件带的字段不一样
+    （有的带 cwd 不带 gitBranch，有的反之），谁有算谁的。
+    """
+    info = result.setdefault("session_info", {})
+    for key, src in (("sessionId", "sessionId"), ("cwd", "cwd"),
+                     ("branch", "gitBranch"), ("version", "version"),
+                     ("entrypoint", "entrypoint")):
+        if not info.get(key):
+            v = obj.get(src, "")
+            if v:
+                info[key] = v
 
 
 def _parse_user(obj, result):

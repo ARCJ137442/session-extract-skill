@@ -72,7 +72,7 @@ def detect_platform(filepath, scan_lines=2000):
     → 改成**扫前 N 行**（实测需要到第 43~174 行），找第一条像消息的记录；
     扫不到再按别的特征判。
     """
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, "r", encoding="utf-8-sig") as f:
         head = f.read(4096).lstrip("\ufeff \t\r\n")
         if not head:
             raise ValueError("empty file: {}".format(filepath))
@@ -98,7 +98,7 @@ def detect_platform(filepath, scan_lines=2000):
     # ⚠️ 扫描窗口要够大：实测某些 fork/rewind 旁路 transcript 里，第一条真正的
     # user/assistant 出现在**第 43 行甚至第 174 行**（前面全是
     # last-prompt / mode / permission-mode / attachment 这类旁路记录）。
-    with open(filepath, "r", encoding="utf-8") as f:
+    with open(filepath, "r", encoding="utf-8-sig") as f:
         f.seek(0)
         for _ in range(scan_lines):
             line = f.readline()
@@ -807,6 +807,33 @@ def main():
         print()
 
     result = extract(filepath, platform)
+
+    if as_json:
+        # ⚠️ 以前 --json 只在 --scan 路径被消费，Claude/Codex 路径**完全无视**它
+        # —— 一个静默的空开关：用户加了 --json 却拿到人读文本，还以为没生效。
+        # 现在它对所有路径都有效：输出机器可读的 JSON。
+        out = {
+            "platform": result.get("platform"),
+            "session_info": result.get("session_info") or {},
+            "session_title": result.get("session_title") or "",
+            "user_msgs": result.get("user_msgs") or [],
+            "agent_texts": result.get("agent_texts") or [],
+            "tool_uses": result.get("tool_uses") or [],
+            "tool_use_counts": dict(result.get("tool_use_counts") or {}),
+            "file_changes": result.get("file_changes") or [],
+            "system_events": result.get("system_events") or [],
+            "queue_ops": result.get("queue_ops") or [],
+            "compacted_summaries": result.get("compacted_summaries") or [],
+            "totals": {
+                "user_msgs": result.get("total_user_msgs", 0),
+                "agent_msgs": result.get("total_agent_msgs", 0),
+                "tool_results": result.get("total_tool_results", 0),
+                "api_errors": result.get("api_errors", 0),
+                "turn_aborted": result.get("turn_aborted", 0),
+            },
+        }
+        print(json.dumps(out, ensure_ascii=False, indent=2, default=str))
+        return 0
 
     if mode == "full":
         print_full(result)
